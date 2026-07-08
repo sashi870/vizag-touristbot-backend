@@ -1,0 +1,9 @@
+destSubHead,destSubText,destSubText 2,destSubText 3,destSubText 4,destSubText 5,destSubText 6,destSubText 7,destSubText 8,destSubText 9,destSubText 10,destSubText 11,destSubText 12,destSubText 13,destSubText 14,destSubText 15,destSubText 16,destSubText 17,destSubText 18,destSubText 19,destSubText 20,destSubText 21,destSubText 22,destSubText 23,destSubText 24
+,,,,,,,,,,,,,,,,,,,,,,,,
+Nearest Train Station:,,,,,,,,,,,,,,,,,,,,,,,,
+Direct Trains to Markapur,,,,,,,,,,,,,,,,,,,,,,,,
+,From,Dist (Kms),Freq,Duration,Kurnool to Markapur,160.0,3/Day,5 Hrs,Vijayawada to Markapur,177.0,7/Day,4 Hrs,Hyderabad to Markapur,230.0,3/Day,8 Hrs,Hubli to Markapur,517.0,3/Day,13 Hrs,Vizag to Markapur,527.0,3/Day,10 Hrs
+Direct Trains to Nandyal,,,,,,,,,,,,,,,,,,,,,,,,
+,From,Dist (Kms),Freq,Duration,Hyderabad to Nandyal,280.0,6/Day,8 Hrs,Vijayawada to Nandyal,290.0,7/Day,8 Hrs,Hubli to Nandyal,400.0,3/Day,10 Hrs,Bangalore to Nandyal,500.0,1/Day,9 Hrs,Vizag to Nandyal,640.0,3/Day,12 Hrs
+Direct Trains to Kurnool,,,,,,,,,,,,,,,,,,,,,,,,
+,From,Dist (Kms),Freq,Duration,Markapur to Kurnool,160.0,3/Day,5 Hrs,Hyderabad to Kurnool,210.0,6/Day,7 Hrs,Tirupati to Kurnool,339.0,2/Day,8 Hrs,Chittoor to Kurnool,373.0,1/Day,8 Hrs,,,,
