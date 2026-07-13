@@ -5,3 +5,26 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+# Databases and runtime data
+*.db
+*.sqlite
+*.sqlite3
+reviews.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+
+# Logs
+*.log
