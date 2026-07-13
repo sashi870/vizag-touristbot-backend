@@ -1,18 +1,18 @@
-version: '3.9'
+FROM python:3.11-slim
 
-services:
-  backend:
-    build: ./backend
-    ports:
-      - "8000:8000"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
 
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
+WORKDIR /app
 
-  postgres:
-    image: postgres
+COPY requirements.txt .
 
-  ollama:
-    image: ollama/ollama
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
