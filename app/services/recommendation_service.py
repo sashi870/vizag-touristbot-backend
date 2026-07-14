@@ -113,13 +113,92 @@ NEARBY_BEACHES_BY_AREA = {
 }
 
 EXCLUDED_BY_CATEGORY = {
-    "hospitals": ["restaurant", "hotel", "apartment", "college", "school", "food", "kitchen", "ruchulu"],
-    "restaurants": ["hospital", "clinic", "college", "school", "apartment"],
-    "cafes": ["hospital", "clinic", "college", "school"],
+    "hospitals": [
+        "bank",
+        "atm",
+        "shopping mall",
+        "boutique",
+        "clothing store",
+        "gas station",
+        "petrol bunk",
+        "hostel",
+        "hotel",
+        "restaurant",
+        "food",
+        "school",
+        "college",
+        "apartment",
+        "finance",
+        "insurance",
+        "loan agency",
+        "supermarket",
+        "pet hospital",
+        "veterinary",
+        "veterinarian",
+        "animal hospital",
+        "animal clinic",
+        "pet clinic",
+    ],
+    "restaurants": [
+        "hospital",
+        "clinic",
+        "college",
+        "school",
+        "apartment",
+    ],
+    "cafes": [
+        "hospital",
+        "clinic",
+        "college",
+        "school",
+    ],
 }
 
-REQUIRED_BY_CATEGORY = {
-    "hospitals": ["hospital", "clinic", "medical", "doctor", "dental", "eye", "health", "dispensary", "care", "pharmacy"],
+HOSPITAL_ALLOWED_CATEGORIES = {
+    "hospital",
+    "general hospital",
+    "private hospital",
+    "government hospital",
+    "specialized hospital",
+    "children's hospital",
+    "maternity hospital",
+    "psychiatric hospital",
+    "cancer treatment center",
+    "medical center",
+    "medical centre",
+    "medical clinic",
+    "clinic",
+    "polyclinic",
+    "diagnostic center",
+    "diagnostic centre",
+    "doctor",
+    "general practitioner",
+    "physician",
+    "cardiologist",
+    "neurologist",
+    "nephrologist",
+    "urologist",
+    "radiologist",
+    "dermatologist",
+    "pediatrician",
+    "pulmonologist",
+    "ophthalmologist",
+    "gynecologist",
+    "obstetrician-gynecologist",
+    "gastroenterologist",
+    "orthopedic surgeon",
+    "orthopaedic surgeon",
+    "surgeon",
+    "dentist",
+    "dental clinic",
+    "dental radiology",
+    "pharmacy",
+    "healthcare",
+    "health care",
+    "physiotherapy center",
+    "physiotherapy centre",
+    "ayurvedic clinic",
+    "alternative medicine practitioner",
 }
 
 
@@ -1089,35 +1168,161 @@ def clean_display_text(value):
     text = re.sub(r"\s+", " ", text).strip(" ,.-")
     return text
 
-def is_valid_category_row(row, category):
-    text = row_text(row)
-    name = get_place_name(row).lower()
-    combined = f"{name} {text}"
 
-    for bad in EXCLUDED_BY_CATEGORY.get(category, []):
-        if bad in combined:
+def normalize_category_value(value):
+    value = str(value or "").strip().lower()
+
+    if not value or value in {"nan", "none", "null", "n/a"}:
+        return ""
+
+    value = value.replace("&", " and ")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def get_row_category_values(row):
+    keys = [
+        "categoryName",
+        "Category Name",
+        "category",
+        "Category",
+        "categories",
+        "categories/0",
+        "categories/1",
+        "categories/2",
+        "categories/3",
+        "categories/4",
+        "categories/5",
+        "categories/6",
+        "categories/7",
+        "categories/8",
+        "categories/9",
+    ]
+
+    values = []
+
+    for key in keys:
+        if key not in row or pd.isna(row[key]):
+            continue
+
+        value = normalize_category_value(row[key])
+
+        if not value:
+            continue
+
+        if value.startswith(("http://", "https://")):
+            continue
+
+        if value.endswith(".csv"):
+            continue
+
+        if re.fullmatch(r"\+?[0-9\s\-()]{7,}", value):
+            continue
+
+        if value not in values:
+            values.append(value)
+
+    return values
+
+
+def is_valid_rating_value(value):
+    try:
+        rating = float(str(value).strip())
+        return 0 <= rating <= 5
+    except (TypeError, ValueError):
+        return False
+
+
+def clean_rating_value(row):
+    for key in [
+        "rating",
+        "Rating",
+        "totalScore",
+        "TotalScore",
+        "score",
+        "Score",
+    ]:
+        if key not in row or pd.isna(row[key]):
+            continue
+
+        value = str(row[key]).strip()
+        if is_valid_rating_value(value):
+            return f"{float(value):.1f}"
+
+    return "N/A"
+
+
+def looks_like_malformed_hospital_row(row):
+    name = normalize_category_value(get_place_name(row))
+    if not name or name == "unknown place":
+        return True
+
+    raw_rating = safe_get(
+        row,
+        ["rating", "Rating", "totalScore", "TotalScore", "score", "Score"],
+        "",
+    )
+    if raw_rating and not is_valid_rating_value(raw_rating):
+        return True
+
+    raw_map_url = safe_get(
+        row,
+        ["google_maps_url", "googleMapsUrl", "map_url", "url", "URL"],
+        "",
+    )
+    if raw_map_url and not raw_map_url.startswith(("http://", "https://")):
+        return True
+
+    return False
+
+
+def is_valid_category_row(row, category):
+    name = normalize_category_value(get_place_name(row))
+    categories = get_row_category_values(row)
+    combined_name_categories = f"{name} {' '.join(categories)}".strip()
+
+    for bad_value in EXCLUDED_BY_CATEGORY.get(category, []):
+        if bad_value in combined_name_categories:
             return False
 
-    required = REQUIRED_BY_CATEGORY.get(category, [])
-    if required and not any(word in combined for word in required):
-        return False
+    if category == "hospitals":
+        if looks_like_malformed_hospital_row(row):
+            return False
+
+        if not categories:
+            return False
+
+        has_medical_category = any(
+            allowed == category_value
+            or allowed in category_value
+            or category_value in allowed
+            for category_value in categories
+            for allowed in HOSPITAL_ALLOWED_CATEGORIES
+        )
+        if not has_medical_category:
+            return False
 
     return True
 
 
 def filter_valid_category_rows(df, category):
-    # Do not over-filter theaters because theater CSV column names vary a lot.
-    # Otherwise "theaters in vizag" may return no records.
-    if category == "theaters":
-        return df
-
     if df is None or df.empty:
         return df
-    valid_rows = []
-    for _, row in df.iterrows():
-        if is_valid_category_row(row, category):
-            valid_rows.append(row)
-    return pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
+
+    # Theater CSV schemas vary widely; keep existing behavior there.
+    if category == "theaters":
+        return df.reset_index(drop=True)
+
+    valid_rows = [
+        row
+        for _, row in df.iterrows()
+        if is_valid_category_row(row, category)
+    ]
+
+    if not valid_rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(valid_rows).reset_index(drop=True)
 
 
 def filter_beaches_by_area(df, location):
@@ -1201,18 +1406,7 @@ def format_places(df, category, location=None, more=False, state=None):
         added_places.add(place_name.lower())
         displayed_place_names.append(place_name)
 
-        rating = safe_get(
-            row,
-            [
-                "rating",
-                "Rating",
-                "totalScore",
-                "TotalScore",
-                "score",
-                "Score"
-            ],
-            "N/A"
-        )
+        rating = clean_rating_value(row)
 
         map_url = safe_get(
             row,
@@ -1225,6 +1419,12 @@ def format_places(df, category, location=None, more=False, state=None):
             ],
             "#"
         )
+
+        if not str(map_url).startswith(("http://", "https://")):
+            map_url = (
+                "https://www.google.com/maps/search/?api=1&query="
+                + requests.utils.quote(place_name)
+            )
 
         image_url = safe_get(
             row,
