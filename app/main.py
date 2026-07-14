@@ -2,14 +2,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
 
 import pandas as pd
 import traceback
 import os
 import sqlite3
 from pathlib import Path
-from typing import Literal
 import csv
 import re
 import json
@@ -29,6 +27,16 @@ from app.auth import (
     get_current_username,
     hash_password,
     verify_password,
+)
+
+from app.schemas import (
+    AuthRequest,
+    ChatMessage,
+    ChatRequest,
+    HistoryRequest,
+    ReviewHelpfulRequest,
+    ReviewRequest,
+    TranslateTextRequest,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -357,18 +365,6 @@ speciality_files = {
 app = FastAPI(title="Vizag AI Travel Assistant")
 
 
-class AuthRequest(BaseModel):
-    username: str = Field(min_length=4, max_length=20)
-    password: str = Field(min_length=8, max_length=128)
-
-
-class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=4000)
-
-
-class HistoryRequest(BaseModel):
-    history: list[ChatMessage] = Field(default_factory=list, max_length=100)
 
 
 def _init_database():
@@ -703,30 +699,10 @@ if os.path.isdir(FRONTEND_DIR):
 
 
 # Conversation voice mode is handled by frontend; backend continues to process each spoken query normally.
-class ChatRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=2000)
-    original_query: str = Field(default="", max_length=2000)
-    language: str = Field(default="English", max_length=20)
-    session_id: str = Field(
-        min_length=16,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._:-]+$",
-    )
 
 
 
 
-class ReviewRequest(BaseModel):
-    place_name: str = Field(min_length=1, max_length=200)
-    category: str = Field(default="", max_length=100)
-    rating: int = Field(ge=1, le=5)
-    review: str = Field(min_length=2, max_length=2000)
-    visited_date: str = Field(default="", max_length=30)
-
-
-class ReviewHelpfulRequest(BaseModel):
-    place_name: str = Field(min_length=1, max_length=200)
-    created_at: str = Field(default="", max_length=50)
 
 
 @app.get("/")
@@ -872,9 +848,6 @@ def top_rated_places(limit: int = 10):
     return {"success": True, "places": [dict(row) for row in rows]}
 
 
-class TranslateTextRequest(BaseModel):
-    text: str
-    language: str = "English"
 
 
 @app.post("/translate_text")

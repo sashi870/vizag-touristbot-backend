@@ -85,3 +85,4 @@ app/auth_before_jwt.py
 app/__pycache__/
 **/__pycache__/
 *.pyc
+app/main_before_schema_extraction.py
