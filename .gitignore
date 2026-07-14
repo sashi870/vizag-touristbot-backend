@@ -1,30 +1,79 @@
+# Environment variables and secrets
+
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+
 venv/
 .venv/
-__pycache__/
-*.pyc
+env/
+ENV/
+
+# Python cache and generated files
+
+**pycache**/
+*.py[cod]
 *.pyo
 *.pyd
-.env
+*$py.class
+
 # Databases and runtime data
+
 *.db
 *.sqlite
 *.sqlite3
 reviews.json
 
-# Secrets
-.env
-.env.*
-!.env.example
+# Application database
 
-# Python-generated files
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
+app/tourist_users.db
 
-# Virtual environments
-venv/
-.venv/
+# Backup files
+
+app/main_before_auth_fix.py
+app/main_before_security_update.py
+app/main_before_refactor.py
 
 # Logs
+
 *.log
+
+# Test and coverage files
+
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Type-checking and linting cache
+
+.mypy_cache/
+.ruff_cache/
+
+# Build and package files
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE and editor files
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating system files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+app/auth_before_jwt.py
+
+app/main_before_jwt.py
+
+inspect_users_db.py

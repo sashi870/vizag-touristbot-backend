@@ -1,94 +1,67 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 import pandas as pd
 import traceback
 import os
+import sqlite3
+from pathlib import Path
+from typing import Literal
 import csv
 import requests
 import re
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.services.recommendation_service import get_recommendations
-
+from app.auth import (
+    create_access_token,
+    get_current_username,
+    hash_password,
+    verify_password,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-REVIEWS_FILE = os.path.join(BASE_DIR, "reviews.json")
+DB_PATH = Path(__file__).resolve().parent / "tourist_users.db"
 
 
-def load_reviews():
-    """Load all place reviews from app/reviews.json."""
-    try:
-        if not os.path.exists(REVIEWS_FILE):
-            with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f, ensure_ascii=False, indent=2)
-            return []
-
-        with open(REVIEWS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        return data if isinstance(data, list) else []
-
-    except Exception as e:
-        print("REVIEW LOAD ERROR:", e)
-        return []
-
-
-def save_reviews(reviews):
-    """Save reviews safely."""
-    try:
-        with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
-            json.dump(reviews, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        print("REVIEW SAVE ERROR:", e)
-        return False
+def _db():
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
 def normalize_review_place_name(value):
     value = str(value or "").strip().lower()
     value = re.sub(r"\s+", " ", value)
-    value = value.replace("’", "'")
-    return value
+    return value.replace("’", "'")
 
 
 def review_summary_for_place(place_name):
-    reviews = [
-        r for r in load_reviews()
-        if normalize_review_place_name(r.get("place_name")) == normalize_review_place_name(place_name)
-    ]
+    normalized = normalize_review_place_name(place_name)
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT username, place_name, category, rating, review,
+                   visited_date, helpful, created_at
+            FROM reviews
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
 
-    if not reviews:
-        return {
-            "average_rating": 0,
-            "review_count": 0,
-            "reviews": []
-        }
-
-    ratings = []
-    for r in reviews:
-        try:
-            ratings.append(float(r.get("rating", 0)))
-        except Exception:
-            pass
-
-    avg = round(sum(ratings) / len(ratings), 1) if ratings else 0
-
-    # Latest reviews first
-    reviews = sorted(reviews, key=lambda x: x.get("created_at", ""), reverse=True)
-
+    reviews = [dict(row) for row in rows if normalize_review_place_name(row["place_name"]) == normalized]
+    ratings = [float(item["rating"]) for item in reviews]
+    average = round(sum(ratings) / len(ratings), 1) if ratings else 0
     return {
-        "average_rating": avg,
+        "average_rating": average,
         "review_count": len(reviews),
-        "reviews": reviews[:10]
+        "reviews": reviews[:10],
     }
-
-
 
 def load_csv(filename):
     path = os.path.join(BASE_DIR, "datasets", filename)
@@ -680,44 +653,31 @@ speciality_files = {
 
 
 
-app = FastAPI()
-# Paste this code into backend/app/main.py AFTER: app = FastAPI()
-# It stores registered users and chat history in SQLite database: backend/app/tourist_users.db
+app = FastAPI(title="Vizag AI Travel Assistant")
 
-from pydantic import BaseModel
-from fastapi import HTTPException
-from pathlib import Path
-import sqlite3
-import hashlib
-import secrets
-import json
-from datetime import datetime
-
-DB_PATH = Path(__file__).resolve().parent / "tourist_users.db"
 
 class AuthRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=4, max_length=20)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class HistoryMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str = Field(min_length=1, max_length=5000)
+
 
 class HistoryRequest(BaseModel):
-    history: list
+    history: list[HistoryMessage] = Field(default_factory=list, max_length=200)
 
 
-def _db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _init_auth_db():
+def _init_database():
     with _db() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
+                username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
@@ -727,110 +687,132 @@ def _init_auth_db():
             CREATE TABLE IF NOT EXISTS chat_history (
                 username TEXT PRIMARY KEY,
                 history_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                place_name TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+                review TEXT NOT NULL,
+                visited_date TEXT NOT NULL DEFAULT '',
+                helpful INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_place ON reviews(place_name)")
         conn.commit()
 
 
-_init_auth_db()
+_init_database()
 
 
-def _validate_username(username: str):
+def _validate_username(username: str) -> str:
     username = username.strip()
-    if not username:
-        raise HTTPException(status_code=400, detail="Username is required.")
-    import re
-    if len(username) < 4 or len(username) > 20:
-        raise HTTPException(status_code=400, detail="Username must be 4 to 20 characters long.")
-    if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", username):
-        raise HTTPException(status_code=400, detail="Username must start with a letter and use only letters, numbers, or underscore.")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,19}", username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 4 to 20 characters, start with a letter, and contain only letters, numbers, or underscore.",
+        )
     return username
 
 
-def _validate_password(password: str):
-    if not password:
-        raise HTTPException(status_code=400, detail="Password is required.")
-    import re
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+def _validate_password(password: str) -> None:
+    if len(password) < 8 or len(password) > 128:
+        raise HTTPException(status_code=400, detail="Password must be 8 to 128 characters long.")
     if not re.search(r"[A-Z]", password):
         raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter.")
     if not re.search(r"[a-z]", password):
         raise HTTPException(status_code=400, detail="Password must contain at least one lowercase letter.")
     if not re.search(r"[0-9]", password):
         raise HTTPException(status_code=400, detail="Password must contain at least one number.")
-    if not re.search(r"[!@#$%^&*(),.?\":{}|<>_\-+=\[\]\\;/`~]", password):
+    if not re.search(r"[^A-Za-z0-9]", password):
         raise HTTPException(status_code=400, detail="Password must contain at least one special character.")
 
 
-def _hash_password(password: str, salt: str) -> str:
-    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 1_048_576:
+                return JSONResponse(status_code=413, content={"detail": "Request body exceeds the 1 MB limit."})
+        except ValueError:
+            pass
+    return await call_next(request)
 
 
-@app.post("/auth/register")
+@app.post("/auth/register", status_code=status.HTTP_201_CREATED)
 def register_user(payload: AuthRequest):
     username = _validate_username(payload.username)
     _validate_password(payload.password)
-
-    salt = secrets.token_hex(16)
-    password_hash = _hash_password(payload.password, salt)
-
     try:
+        secure_hash = hash_password(payload.password)
         with _db() as conn:
             conn.execute(
-                "INSERT INTO users (username, password_hash, salt, created_at) VALUES (?, ?, ?, ?)",
-                (username, password_hash, salt, datetime.utcnow().isoformat()),
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, secure_hash, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail="This username is already registered. Please login.")
-
-    return {"success": True, "message": "Registration successful. Please login."}
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="This username is already registered. Please login.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "username": username, "message": "Registration successful. Please login."}
 
 
 @app.post("/auth/login")
 def login_user(payload: AuthRequest):
     username = payload.username.strip()
-    password = payload.password
-
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Username and password are required.")
-
     with _db() as conn:
-        row = conn.execute("SELECT username, password_hash, salt FROM users WHERE username = ?", (username,)).fetchone()
+        row = conn.execute(
+            "SELECT username, password_hash FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    if row is None or not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = create_access_token(row["username"])
+    return {
+        "success": True,
+        "access_token": token,
+        "token_type": "bearer",
+        "username": row["username"],
+        "message": "Login successful.",
+    }
 
-    if row is None:
-        raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    if _hash_password(password, row["salt"]) != row["password_hash"]:
-        raise HTTPException(status_code=401, detail="Invalid username or password.")
-
-    return {"success": True, "username": username, "message": "Login successful."}
-
-
-@app.get("/history/{username}")
-def get_history(username: str):
-    username = username.strip()
+@app.get("/history")
+def get_history(current_username: str = Depends(get_current_username)):
     with _db() as conn:
-        row = conn.execute("SELECT history_json FROM chat_history WHERE username = ?", (username,)).fetchone()
+        row = conn.execute(
+            "SELECT history_json FROM chat_history WHERE username = ?",
+            (current_username,),
+        ).fetchone()
+    history = []
+    if row is not None:
+        try:
+            decoded = json.loads(row["history_json"])
+            history = decoded if isinstance(decoded, list) else []
+        except json.JSONDecodeError:
+            history = []
+    return {"username": current_username, "history": history}
 
-    if row is None:
-        return {"history": []}
 
-    try:
-        return {"history": json.loads(row["history_json"])}
-    except Exception:
-        return {"history": []}
-
-
-@app.post("/history/{username}")
-def save_history(username: str, payload: HistoryRequest):
-    username = username.strip()
-    history_json = json.dumps(payload.history, ensure_ascii=False)
-    now = datetime.utcnow().isoformat()
-
+@app.post("/history")
+def save_history(payload: HistoryRequest, current_username: str = Depends(get_current_username)):
+    items = [item.model_dump() for item in payload.history]
     with _db() as conn:
         conn.execute(
             """
@@ -840,19 +822,27 @@ def save_history(username: str, payload: HistoryRequest):
                 history_json = excluded.history_json,
                 updated_at = excluded.updated_at
             """,
-            (username, history_json, now),
+            (current_username, json.dumps(items, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
+    return {"success": True, "username": current_username, "saved": len(items)}
 
-    return {"success": True, "saved": len(payload.history)}
 
+allowed_origins = [
+    value.strip()
+    for value in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://localhost:8080",
+    ).split(",")
+    if value.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "../../frontend"))
@@ -872,17 +862,16 @@ class ChatRequest(BaseModel):
 
 
 class ReviewRequest(BaseModel):
-    place_name: str
-    category: str = ""
-    user_name: str = "Traveler"
-    rating: int
-    review: str
-    visited_date: str = ""
+    place_name: str = Field(min_length=1, max_length=200)
+    category: str = Field(default="", max_length=100)
+    rating: int = Field(ge=1, le=5)
+    review: str = Field(min_length=2, max_length=2000)
+    visited_date: str = Field(default="", max_length=30)
 
 
 class ReviewHelpfulRequest(BaseModel):
-    place_name: str
-    created_at: str = ""
+    place_name: str = Field(min_length=1, max_length=200)
+    created_at: str = Field(default="", max_length=50)
 
 
 @app.get("/")
@@ -894,132 +883,73 @@ async def serve_frontend():
 
 
 @app.post("/reviews")
-def add_place_review(data: ReviewRequest):
-    """Add a user review for any place card."""
-    try:
-        place_name = str(data.place_name or "").strip()
-        user_name = str(data.user_name or "Traveler").strip()
-        review_text = str(data.review or "").strip()
-        category = str(data.category or "").strip()
+def add_place_review(
+    data: ReviewRequest,
+    current_username: str = Depends(get_current_username),
+):
+    place_name = data.place_name.strip()
+    category = data.category.strip()
+    review_text = data.review.strip()
+    created_at = datetime.now(timezone.utc).isoformat()
 
-        try:
-            rating = int(data.rating)
-        except Exception:
-            rating = 0
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO reviews (
+                username, place_name, category, rating, review,
+                visited_date, helpful, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                current_username, place_name, category, data.rating,
+                review_text, data.visited_date.strip(), created_at,
+            ),
+        )
+        conn.commit()
 
-        if not place_name:
-            return {"success": False, "message": "Place name is required."}
-
-        if rating < 1 or rating > 5:
-            return {"success": False, "message": "Please select rating from 1 to 5."}
-
-        if not review_text:
-            return {"success": False, "message": "Please write your review."}
-
-        reviews = load_reviews()
-
-        new_review = {
-            "place_name": place_name,
-            "category": category,
-            "user_name": user_name or "Traveler",
-            "rating": rating,
-            "review": review_text,
-            "visited_date": str(data.visited_date or "").strip(),
-            "helpful": 0,
-            "created_at": datetime.now().isoformat(timespec="seconds")
-        }
-
-        reviews.append(new_review)
-
-        if not save_reviews(reviews):
-            return {"success": False, "message": "Could not save review. Please try again."}
-
-        summary = review_summary_for_place(place_name)
-
-        return {
-            "success": True,
-            "message": "Thank you! Your review has been submitted.",
-            "review": new_review,
-            "summary": summary
-        }
-
-    except Exception:
-        traceback.print_exc()
-        return {"success": False, "message": "Review submission failed."}
+    new_review = {
+        "username": current_username,
+        "place_name": place_name,
+        "category": category,
+        "rating": data.rating,
+        "review": review_text,
+        "visited_date": data.visited_date.strip(),
+        "helpful": 0,
+        "created_at": created_at,
+    }
+    return {
+        "success": True,
+        "message": "Thank you! Your review has been submitted.",
+        "review": new_review,
+        "summary": review_summary_for_place(place_name),
+    }
 
 
 @app.get("/reviews")
 def get_place_reviews(place_name: str = ""):
-    """Get reviews and average rating for a selected place."""
-    try:
-        if not str(place_name or "").strip():
-            return {"success": False, "message": "place_name is required", "average_rating": 0, "review_count": 0, "reviews": []}
-
-        summary = review_summary_for_place(place_name)
-
-        return {
-            "success": True,
-            "place_name": place_name,
-            "average_rating": summary["average_rating"],
-            "review_count": summary["review_count"],
-            "reviews": summary["reviews"]
-        }
-
-    except Exception:
-        traceback.print_exc()
-        return {"success": False, "message": "Could not load reviews", "average_rating": 0, "review_count": 0, "reviews": []}
+    place_name = place_name.strip()
+    if not place_name:
+        raise HTTPException(status_code=400, detail="place_name is required.")
+    summary = review_summary_for_place(place_name)
+    return {"success": True, "place_name": place_name, **summary}
 
 
 @app.get("/top-rated-places")
 def top_rated_places(limit: int = 10):
-    """Return places sorted by user review average rating."""
-    try:
-        reviews = load_reviews()
-        grouped = {}
-
-        for review in reviews:
-            name = str(review.get("place_name", "")).strip()
-            if not name:
-                continue
-
-            key = normalize_review_place_name(name)
-            grouped.setdefault(key, {
-                "place_name": name,
-                "category": review.get("category", ""),
-                "ratings": [],
-                "review_count": 0
-            })
-
-            try:
-                grouped[key]["ratings"].append(float(review.get("rating", 0)))
-            except Exception:
-                pass
-
-            grouped[key]["review_count"] += 1
-
-        results = []
-        for item in grouped.values():
-            ratings = item.pop("ratings", [])
-            avg = round(sum(ratings) / len(ratings), 1) if ratings else 0
-            item["average_rating"] = avg
-            results.append(item)
-
-        results.sort(key=lambda x: (x["average_rating"], x["review_count"]), reverse=True)
-
-        return {
-            "success": True,
-            "places": results[:max(1, min(limit, 50))]
-        }
-
-    except Exception:
-        traceback.print_exc()
-        return {"success": False, "places": []}
-
-
-
-
-
-
+    safe_limit = max(1, min(limit, 50))
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT place_name, category, ROUND(AVG(rating), 1) AS average_rating,
+                   COUNT(*) AS review_count
+            FROM reviews
+            GROUP BY LOWER(TRIM(place_name)), category
+            ORDER BY average_rating DESC, review_count DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+    return {"success": True, "places": [dict(row) for row in rows]}
 
 
 class TranslateTextRequest(BaseModel):
