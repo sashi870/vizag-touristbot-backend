@@ -21,14 +21,65 @@ from app.data_loader import (
     colleges
 )
 
-user_name = "Traveler"
+DEFAULT_CONVERSATION_STATE = {
+    "user_name": "Traveler",
+    "last_category": None,
+    "last_results": [],
+    "last_index": 0,
+    "last_place_name": None,
+    "last_places_list": [],
+    "last_location_context": None,
+    "pending_ambiguous_query": None,
+    "pending_ambiguous_categories": [],
+}
 
-last_category = None
-last_results_df = None
-last_index = 0
-last_place_name = None
-last_places_list = []
-last_location_context = None  # Do not assume every user is in Kommadi
+
+def ensure_conversation_state(state=None):
+    """Return a validated per-user/session state dictionary.
+
+    The caller owns this dictionary and persists it in SQLite/Redis.
+    No mutable conversation data is stored at module level.
+    """
+    if not isinstance(state, dict):
+        state = {}
+
+    for key, default in DEFAULT_CONVERSATION_STATE.items():
+        if key not in state:
+            state[key] = list(default) if isinstance(default, list) else default
+
+    if not isinstance(state.get("last_results"), list):
+        state["last_results"] = []
+    if not isinstance(state.get("last_places_list"), list):
+        state["last_places_list"] = []
+    if not isinstance(state.get("pending_ambiguous_categories"), list):
+        state["pending_ambiguous_categories"] = []
+
+    try:
+        state["last_index"] = max(0, int(state.get("last_index", 0)))
+    except (TypeError, ValueError):
+        state["last_index"] = 0
+
+    return state
+
+
+def state_results_dataframe(state):
+    records = state.get("last_results", [])
+    if not isinstance(records, list) or not records:
+        return pd.DataFrame()
+    try:
+        return pd.DataFrame(records)
+    except Exception:
+        return pd.DataFrame()
+
+
+def store_results_dataframe(state, df):
+    if df is None or df.empty:
+        state["last_results"] = []
+        return
+
+    safe_df = df.reset_index(drop=True).copy()
+    safe_df = safe_df.where(pd.notna(safe_df), None)
+    state["last_results"] = safe_df.to_dict(orient="records")[:100]
 
 PAGE_SIZE = 30  # show 30 results for heavy categories; beaches are shown fully below
 FUZZY_LOCATION_SCORE = 75
@@ -138,7 +189,7 @@ def expand_beach_alias_terms(value):
     return out
 
 
-def extract_route_source_destination(query):
+def extract_route_source_destination(query, state):
     """Extract source and destination from queries like 'bus details from Kommadi to Mutyalammapalem Beach'."""
     q = str(query or "").strip()
     q_low = q.lower()
@@ -156,7 +207,7 @@ def extract_route_source_destination(query):
                 source = clean_location_text(match.group(1)) or match.group(1).strip()
                 destination = match.group(2).strip()
             else:
-                source = current_location_from_query(q) or last_location_context
+                source = current_location_from_query(q) or state.get("last_location_context")
                 destination = match.group(1).strip()
 
             destination = re.sub(r"\b(bus details|bus route|apsrtc|bus|route|please|pls)\b", " ", destination, flags=re.I)
@@ -287,7 +338,7 @@ def format_apsrtc_bus_details(rows, source, destination):
     return [{"message": "\n".join(lines).strip()}]
 
 
-def handle_apsrtc_bus_query(query):
+def handle_apsrtc_bus_query(query, state):
     q = str(query or "").lower()
     if not any(word in q for word in ["bus", "apsrtc", "route no", "route number"]):
         return None
@@ -296,7 +347,7 @@ def handle_apsrtc_bus_query(query):
     if "beach" not in q and not any(alias in q for alias in ["mutyalammapalem", "mutyalampalem", "rk", "rushikonda", "yarada", "bheemili", "bheemunipatnam", "kapuluppada"]):
         return None
 
-    source, destination = extract_route_source_destination(query)
+    source, destination = extract_route_source_destination(query, state)
     if not destination:
         return None
 
@@ -457,9 +508,7 @@ def smart_local_answer(query):
     return None
 
 
-def extract_name(query):
-    global user_name
-
+def extract_name(query, state):
     patterns = [
         r"call me (.+)",
         r"my name is (.+)",
@@ -471,15 +520,13 @@ def extract_name(query):
         match = re.search(pattern, query.lower())
 
         if match:
-            user_name = match.group(1).strip().title()
+            state["user_name"] = match.group(1).strip().title()
             return [{
-                "message": f"Hey {user_name} 😊 Nice to meet you!"
+                "message": f"Hey {state['user_name']} 😊 Nice to meet you!"
             }]
 
     return None
-
-
-def handle_greetings(query):
+def handle_greetings(query, state):
     q = query.lower().strip()
 
     greetings = [
@@ -491,23 +538,23 @@ def handle_greetings(query):
 
     if q in greetings or re.fullmatch(r"(hi+|hello+|hey+)", q):
         return [{
-            "message": f"Hello {user_name} 😊 I can help like a normal assistant. Ask me about nearby hospitals, restaurants near an area, beaches between places, routes, budget, or anything about Vizag."
+            "message": f"Hello {state['user_name']} 😊 I can help like a normal assistant. Ask me about nearby hospitals, restaurants near an area, beaches between places, routes, budget, or anything about Vizag."
         }]
 
     return None
 
 
-def handle_small_talk(query):
+def handle_small_talk(query, state):
     q = query.lower().strip()
 
     if any(word in q for word in ["thanks", "thank you", "tq", "ధన్యవాదాలు", "शुक्रिया"]):
-        return [{"message": f"You're welcome {user_name} ❤️"}]
+        return [{"message": f"You're welcome {state['user_name']} ❤️"}]
 
     if any(word in q for word in ["bye", "goodbye", "see you", "బై", "अलविदा"]):
-        return [{"message": f"Bye {user_name} 👋 Have a safe Vizag trip!"}]
+        return [{"message": f"Bye {state['user_name']} 👋 Have a safe Vizag trip!"}]
 
     if "how are you" in q or "how r u" in q or "మీరు ఎలా" in q:
-        return [{"message": f"I'm doing great {user_name} 😊 Tell me what you need in Vizag."}]
+        return [{"message": f"I'm doing great {state['user_name']} 😊 Tell me what you need in Vizag."}]
 
     if any(phrase in q for phrase in ["what can you do", "help me", "how can you help", "features"]):
         return [{
@@ -1090,11 +1137,8 @@ def filter_beaches_by_area(df, location):
 
 
 
-def format_places(df, category, location=None, more=False):
-    global last_category
-    global last_results_df
-    global last_index
-    global last_location_context
+def format_places(df, category, location=None, more=False, state=None):
+    state = ensure_conversation_state(state)
 
     df = fix_single_column_csv_df(df)
     df = filter_valid_category_rows(df, category)
@@ -1105,11 +1149,12 @@ def format_places(df, category, location=None, more=False):
         }]
 
     if not more:
-        last_category = category
-        last_results_df = df.reset_index(drop=True)
-        last_index = 0
+        state["last_category"] = category
+        store_results_dataframe(state, df)
+        state["last_index"] = 0
 
-    start = last_index
+    last_results_df = state_results_dataframe(state)
+    start = state["last_index"]
 
     # IMPORTANT SPEED FIX:
     # Beaches are a small list, so show all beaches.
@@ -1124,10 +1169,10 @@ def format_places(df, category, location=None, more=False):
 
     if places.empty:
         return [{
-            "message": f"Sorry {user_name} 😅 No more results found."
+            "message": f"Sorry {state['user_name']} 😅 No more results found."
         }]
 
-    last_index = end
+    state["last_index"] = end
 
     if location:
         intro = f"Here are popular {category} near {location.title()} 😊"
@@ -1140,7 +1185,7 @@ def format_places(df, category, location=None, more=False):
 
     displayed_place_names = []
     if location:
-        last_location_context = location
+        state["last_location_context"] = location
 
     added_places = set()
 
@@ -1341,8 +1386,8 @@ def format_places(df, category, location=None, more=False):
         })
 
     if displayed_place_names:
-        last_places_list = displayed_place_names
-        last_place_name = displayed_place_names[0]
+        state["last_places_list"] = displayed_place_names
+        state["last_place_name"] = displayed_place_names[0]
 
     return results
 
@@ -1362,8 +1407,11 @@ def ordinal_to_index(query):
     return None
 
 
-def handle_conversation_followup(query):
-    global last_category, last_results_df, last_place_name, last_places_list
+def handle_conversation_followup(query, state):
+    state = ensure_conversation_state(state)
+    last_results_df = state_results_dataframe(state)
+    last_category = state.get("last_category")
+    last_place_name = state.get("last_place_name")
 
     q = str(query or "").lower().strip()
 
@@ -1374,7 +1422,7 @@ def handle_conversation_followup(query):
     if any(word in q for word in ["first", "second", "third", "fourth", "fifth", "1st", "2nd", "3rd", "4th", "5th"]):
         index = ordinal_to_index(q)
         if index is not None and last_results_df is not None and last_category and index < len(last_results_df):
-            return format_places(last_results_df.iloc[[index]], last_category)
+            return format_places(last_results_df.iloc[[index]], last_category, state=state)
 
     # User says: tell me about it / details / more details
     if any(phrase in q for phrase in [
@@ -1410,46 +1458,58 @@ def handle_conversation_followup(query):
     return None
 
 
-def get_recommendations(query, language="English"):
-    global last_category
-    global last_results_df
-    global last_location_context
+def get_recommendations(query, language="English", state=None):
+    """Return recommendations plus updated per-session state.
+
+    Conversation state is supplied by the caller and must be persisted by the
+    API layer. No user-specific state is stored in module-level variables.
+    """
+    state = ensure_conversation_state(state)
 
     original_query = str(query or "").strip()
     query = original_query.lower().strip()
 
     if not query:
-        return [{"message": "Please ask me anything about Vizag 😊"}]
+        return [{"message": "Please ask me anything about Vizag 😊"}], state
 
-    response = extract_name(original_query)
+    response = extract_name(original_query, state)
     if response:
-        return response
+        return response, state
 
-    response = handle_greetings(original_query)
+    response = handle_greetings(original_query, state)
     if response:
-        return response
+        return response, state
 
-    response = handle_small_talk(original_query)
+    response = handle_small_talk(original_query, state)
     if response:
-        return response
+        return response, state
 
     response = smart_local_answer(original_query)
     if response:
-        return response
+        return response, state
 
-    response = handle_conversation_followup(original_query)
+    response = handle_conversation_followup(original_query, state)
     if response:
-        return response
+        return response, state
 
-    response = handle_apsrtc_bus_query(original_query)
+    response = handle_apsrtc_bus_query(original_query, state)
     if response:
-        return response
+        return response, state
 
     # Pagination: user can say more / next / show more.
     if any(word in query for word in ["more", "next", "show more", "another", "load more"]):
-        if last_category and last_results_df is not None:
-            return format_places(last_results_df, last_category, more=True)
-        return [{"message": "Tell me a category first, like restaurants in Vizag or hospitals near MVP."}]
+        last_category = state.get("last_category")
+        last_results_df = state_results_dataframe(state)
+        if last_category and not last_results_df.empty:
+            return format_places(
+                last_results_df,
+                last_category,
+                more=True,
+                state=state,
+            ), state
+        return [{
+            "message": "Tell me a category first, like restaurants in Vizag or hospitals near MVP."
+        }], state
 
     category = detect_category(query)
 
@@ -1457,29 +1517,38 @@ def get_recommendations(query, language="English"):
         df = get_category_df(category)
 
         if df is None or df.empty:
-            return [{"message": f"No {category} dataset found."}]
+            return [{"message": f"No {category} dataset found."}], state
 
         df = filter_valid_category_rows(df, category)
         if df is None or df.empty:
-            return [{"message": f"No clean {category} records found in dataset."}]
+            return [{"message": f"No clean {category} records found in dataset."}], state
 
         # Between-place query: hospitals between Gajuwaka and NAD, beaches between Kommadi and Bheemili, etc.
         place_a, place_b = extract_between_locations(query)
         if place_a and place_b:
             between_df = find_between_places(df, place_a, place_b)
             intro_location = f"{place_a.title()} and {place_b.title()}"
-            return format_places(between_df, category, intro_location)
+            return format_places(
+                between_df,
+                category,
+                intro_location,
+                state=state,
+            ), state
 
         # Specific place query first, but do not mistakenly treat area queries as place names.
         location = extract_location(query)
         if location:
-            last_location_context = location
+            state["last_location_context"] = location
         is_general = is_general_category_query(query, category) or bool(location)
 
         if not is_general:
             single_df = search_single_place(df, query, category)
             if not single_df.empty:
-                return format_places(single_df.head(1), category)
+                return format_places(
+                    single_df.head(1),
+                    category,
+                    state=state,
+                ), state
 
         if location:
             if category == "beaches":
@@ -1497,17 +1566,17 @@ def get_recommendations(query, language="English"):
                         f"I could not find exact {category} near {location.title()} in my CSV. "
                         f"Try another nearby area name, or ask '{category} in Vizag' to see all available results."
                     )
-                }]
+                }], state
 
         intent = detect_intent(query)
         if intent == "top":
             df = sort_top_places(df)
 
-        return format_places(df, category, location)
+        return format_places(df, category, location, state=state), state
 
     # If user asks a normal ChatGPT-like question, use AI fallback.
     ai_response = ask_ollama(original_query)
-    return [{"message": ai_response}]
+    return [{"message": ai_response}], state
 
 
 
@@ -1540,75 +1609,96 @@ def detect_ambiguous_place(query):
     return matched_categories
 
 
-def get_recommendations_with_ambiguity(query, language="English"):
-    """Main function that checks for ambiguous place names and prompts user."""
-    # First, check ambiguous place names
+def get_recommendations_with_ambiguity(query, language="English", state=None):
+    """Check ambiguous place names using the caller's per-session state."""
+    state = ensure_conversation_state(state)
     ambiguous_categories = detect_ambiguous_place(query)
 
     if len(ambiguous_categories) > 1:
-        # multiple categories match
+        state["pending_ambiguous_query"] = str(query or "").strip()
+        state["pending_ambiguous_categories"] = ambiguous_categories
         categories_str = ", ".join(ambiguous_categories)
         return [{
             "message": (
                 f"I found multiple types of places named '{query}'. "
                 f"Please clarify which one you mean: {categories_str}."
             )
-        }]
-    elif len(ambiguous_categories) == 1:
-        # exactly one category, proceed as normal
+        }], state
+
+    if len(ambiguous_categories) == 1:
         category = ambiguous_categories[0]
         df = get_category_df(category)
         single_df = search_single_place(df, query, category)
         if not single_df.empty:
-            return format_places(single_df.head(1), category)
+            return format_places(
+                single_df.head(1),
+                category,
+                state=state,
+            ), state
 
-    # Otherwise fallback to original recommendation service
-    return get_recommendations(query, language)
+    return get_recommendations(query, language, state=state)
 
 
-
-# ------------------- Ambiguous Place Session Handling -------------------
-# Global session variable to hold ambiguous queries
-AMBIGUOUS_SESSION = {
-    "query": None,
-    "categories": []
-}
-
-def get_recommendations_with_session(query, language="English"):
-    global AMBIGUOUS_SESSION
-
+def get_recommendations_with_session(query, language="English", state=None):
+    """Resolve ambiguous follow-ups without any module-level session state."""
+    state = ensure_conversation_state(state)
     query_clean = str(query or "").strip()
 
-    # Step 1: If there is a pending ambiguous query, check if user clarified category
-    if AMBIGUOUS_SESSION["query"]:
+    pending_query = state.get("pending_ambiguous_query")
+    pending_categories = state.get("pending_ambiguous_categories", [])
+
+    if pending_query and pending_categories:
         user_response = query_clean.lower()
-        clarified_categories = [cat for cat in AMBIGUOUS_SESSION["categories"] if cat.lower() in user_response]
+        clarified_categories = [
+            category
+            for category in pending_categories
+            if category.lower() in user_response
+        ]
+
         if clarified_categories:
             category = clarified_categories[0]
             df = get_category_df(category)
-            single_df = search_single_place(df, AMBIGUOUS_SESSION["query"], category)
-            AMBIGUOUS_SESSION["query"] = None
-            AMBIGUOUS_SESSION["categories"] = []
+            single_df = search_single_place(df, pending_query, category)
+            state["pending_ambiguous_query"] = None
+            state["pending_ambiguous_categories"] = []
+
             if not single_df.empty:
-                return format_places(single_df.head(1), category)
+                return format_places(
+                    single_df.head(1),
+                    category,
+                    state=state,
+                ), state
         else:
-            return [{"message": "Please specify one of these categories: " + ', '.join(AMBIGUOUS_SESSION['categories'])}]
-    
-    # Step 2: Detect ambiguous place names in new query
+            return [{
+                "message": (
+                    "Please specify one of these categories: "
+                    + ", ".join(pending_categories)
+                )
+            }], state
+
     ambiguous_categories = detect_ambiguous_place(query_clean)
 
     if len(ambiguous_categories) > 1:
-        AMBIGUOUS_SESSION["query"] = query_clean
-        AMBIGUOUS_SESSION["categories"] = ambiguous_categories
+        state["pending_ambiguous_query"] = query_clean
+        state["pending_ambiguous_categories"] = ambiguous_categories
         return [{
-            "message": f"I found multiple types of places named '{query_clean}'. Please clarify which one you mean: " + ', '.join(ambiguous_categories) + "."
-        }]
-    elif len(ambiguous_categories) == 1:
+            "message": (
+                f"I found multiple types of places named '{query_clean}'. "
+                "Please clarify which one you mean: "
+                + ", ".join(ambiguous_categories)
+                + "."
+            )
+        }], state
+
+    if len(ambiguous_categories) == 1:
         category = ambiguous_categories[0]
         df = get_category_df(category)
         single_df = search_single_place(df, query_clean, category)
         if not single_df.empty:
-            return format_places(single_df.head(1), category)
+            return format_places(
+                single_df.head(1),
+                category,
+                state=state,
+            ), state
 
-    # Step 3: fallback to original logic if no ambiguity detected
-    return get_recommendations(query_clean, language)
+    return get_recommendations(query_clean, language, state=state)

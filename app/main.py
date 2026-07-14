@@ -14,6 +14,7 @@ import csv
 import requests
 import re
 import json
+import inspect
 from datetime import datetime, timedelta, timezone
 
 from app.services.recommendation_service import get_recommendations
@@ -708,6 +709,15 @@ def _init_database():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_state (
+                state_key TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_place ON reviews(place_name)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reviews_user_created "
@@ -717,6 +727,126 @@ def _init_database():
 
 
 _init_database()
+
+
+DEFAULT_CONVERSATION_STATE = {
+    "user_name": "Traveler",
+    "last_category": None,
+    "last_results": [],
+    "last_index": 0,
+    "last_place_name": None,
+    "last_places_list": [],
+    "last_location_context": None,
+    "pending_ambiguous_query": None,
+    "pending_ambiguous_categories": [],
+}
+
+
+def _validate_session_id(session_id: str) -> str:
+    session_id = str(session_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", session_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "session_id must be 16 to 128 characters and contain only "
+                "letters, numbers, dot, underscore, colon, or hyphen."
+            ),
+        )
+    return session_id
+
+
+def _default_conversation_state() -> dict:
+    return {
+        "user_name": "Traveler",
+        "last_category": None,
+        "last_results": [],
+        "last_index": 0,
+        "last_place_name": None,
+        "last_places_list": [],
+        "last_location_context": None,
+    }
+
+
+def load_conversation_state(state_key: str) -> dict:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT state_json FROM conversation_state WHERE state_key = ?",
+            (state_key,),
+        ).fetchone()
+
+    state = _default_conversation_state()
+    if row is None:
+        return state
+
+    try:
+        stored = json.loads(row["state_json"])
+    except (TypeError, json.JSONDecodeError):
+        return state
+
+    if not isinstance(stored, dict):
+        return state
+
+    for key in state:
+        if key in stored:
+            state[key] = stored[key]
+
+    if not isinstance(state["last_results"], list):
+        state["last_results"] = []
+    if not isinstance(state["last_places_list"], list):
+        state["last_places_list"] = []
+
+    try:
+        state["last_index"] = max(0, int(state["last_index"]))
+    except (TypeError, ValueError):
+        state["last_index"] = 0
+
+    return state
+
+
+def save_conversation_state(state_key: str, state: dict) -> None:
+    safe_state = _default_conversation_state()
+
+    if isinstance(state, dict):
+        for key in safe_state:
+            if key in state:
+                safe_state[key] = state[key]
+
+    if not isinstance(safe_state["last_results"], list):
+        safe_state["last_results"] = []
+    if not isinstance(safe_state["last_places_list"], list):
+        safe_state["last_places_list"] = []
+
+    # Bound persisted state so a defective recommendation response cannot
+    # grow the SQLite row without limit.
+    safe_state["last_results"] = safe_state["last_results"][:100]
+    safe_state["last_places_list"] = safe_state["last_places_list"][:100]
+
+    try:
+        safe_state["last_index"] = max(0, int(safe_state["last_index"]))
+    except (TypeError, ValueError):
+        safe_state["last_index"] = 0
+
+    payload = json.dumps(safe_state, ensure_ascii=False, default=str)
+    if len(payload.encode("utf-8")) > 512_000:
+        safe_state["last_results"] = []
+        payload = json.dumps(safe_state, ensure_ascii=False, default=str)
+
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_state (state_key, state_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                state_key,
+                payload,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
 
 
 def _validate_username(username: str) -> str:
@@ -874,9 +1004,14 @@ if os.path.isdir(FRONTEND_DIR):
 
 # Conversation voice mode is handled by frontend; backend continues to process each spoken query normally.
 class ChatRequest(BaseModel):
-    query: str
-    original_query: str = ""
-    language: str = "English" 
+    query: str = Field(min_length=1, max_length=2000)
+    original_query: str = Field(default="", max_length=2000)
+    language: str = Field(default="English", max_length=20)
+    session_id: str = Field(
+        min_length=16,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 
@@ -1058,38 +1193,71 @@ def chat(data: ChatRequest):
     original_query = (getattr(data, "original_query", "") or data.query or "").strip()
     query = (data.query or "").strip()
     language = normalize_language(getattr(data, "language", "English"))
+    session_id = _validate_session_id(data.session_id)
+    state_key = f"session:{session_id}"
 
     if not query and not original_query:
-        return localize_response({"recommendations": [{"message": "Please enter something 😊"}]}, language)
+        return localize_response(
+            {"recommendations": [{"message": "Please enter something 😊"}]},
+            language,
+        )
 
     try:
-        # SMART INPUT FIX:
-        # Your CSVs and recommendation logic are mostly English.
-        # If user speaks/types Telugu/Hindi/Tamil/Kannada/Odia, translate query to English first,
-        # then search datasets. This makes questions like:
-        # "ఎంవిపి దగ్గర ఆసుపత్రులు", "గాజువాక నుండి కొమ్మడి మధ్య రెస్టారెంట్లు"
-        # work like normal English queries.
         query_for_backend = query
         if language != "English":
             query_for_backend = translate_to_english_backend(original_query or query)
 
-        # Keep original English query if frontend already translated it better.
         if query and re.search(r"[A-Za-z]", query):
             query_for_backend = query
 
-        recommendations = get_recommendations(query_for_backend, language=language)
+        conversation_state = load_conversation_state(state_key)
+
+        # Backward-compatible bridge:
+        # - current recommendation_service.py continues to run until it is updated;
+        # - the secure version should accept `state=` and return
+        #   `(recommendations, updated_state)`.
+        parameters = inspect.signature(get_recommendations).parameters
+        if "state" in parameters:
+            service_result = get_recommendations(
+                query_for_backend,
+                language=language,
+                state=conversation_state,
+            )
+        else:
+            service_result = get_recommendations(
+                query_for_backend,
+                language=language,
+            )
+
+        updated_state = conversation_state
+        if (
+            isinstance(service_result, tuple)
+            and len(service_result) == 2
+            and isinstance(service_result[1], dict)
+        ):
+            recommendations, updated_state = service_result
+        else:
+            recommendations = service_result
+
+        save_conversation_state(state_key, updated_state)
+
         result = {
             "recommendations": recommendations,
             "language": language,
             "understood_query": query_for_backend,
+            "session_id": session_id,
         }
 
-        # Do not translate big card lists here. Only translate simple plain AI/chat messages.
         return localize_only_plain_messages(result, language)
 
+    except HTTPException:
+        raise
     except Exception:
         traceback.print_exc()
-        return localize_response({"recommendations": [{"message": "Server Error 😢"}]}, language)
+        return localize_response(
+            {"recommendations": [{"message": "Server Error 😢"}]},
+            language,
+        )
 
 
 def clean_name(text):
