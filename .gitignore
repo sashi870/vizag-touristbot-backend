@@ -77,3 +77,11 @@ app/auth_before_jwt.py
 app/main_before_jwt.py
 
 inspect_users_db.py
+
+app/tourist_users.db
+app/tourist_users_backup.db
+app/reviews.json
+app/auth_before_jwt.py
+app/__pycache__/
+**/__pycache__/
+*.pyc
