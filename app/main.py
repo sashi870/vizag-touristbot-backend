@@ -7,7 +7,6 @@ import pandas as pd
 import traceback
 import os
 import sqlite3
-from pathlib import Path
 import csv
 import re
 import json
@@ -39,16 +38,14 @@ from app.schemas import (
     TranslateTextRequest,
 )
 
+from app.core.database import (
+    get_db_connection as _db,
+    init_database as _init_database,
+    load_conversation_state,
+    save_conversation_state,
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-DB_PATH = Path(__file__).resolve().parent / "tourist_users.db"
-
-
-def _db():
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
 
 
 def normalize_review_place_name(value):
@@ -367,75 +364,7 @@ app = FastAPI(title="Vizag AI Travel Assistant")
 
 
 
-def _init_database():
-    with _db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_history (
-                username TEXT PRIMARY KEY,
-                history_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                place_name TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT '',
-                rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
-                review TEXT NOT NULL,
-                visited_date TEXT NOT NULL DEFAULT '',
-                helpful INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS conversation_state (
-                state_key TEXT PRIMARY KEY,
-                state_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_place ON reviews(place_name)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reviews_user_created "
-            "ON reviews(username, created_at)"
-        )
-        conn.commit()
-
-
 _init_database()
-
-
-DEFAULT_CONVERSATION_STATE = {
-    "user_name": "Traveler",
-    "last_category": None,
-    "last_results": [],
-    "last_index": 0,
-    "last_place_name": None,
-    "last_places_list": [],
-    "last_location_context": None,
-    "pending_ambiguous_query": None,
-    "pending_ambiguous_categories": [],
-}
 
 
 def _validate_session_id(session_id: str) -> str:
@@ -449,100 +378,6 @@ def _validate_session_id(session_id: str) -> str:
             ),
         )
     return session_id
-
-
-def _default_conversation_state() -> dict:
-    return {
-        "user_name": "Traveler",
-        "last_category": None,
-        "last_results": [],
-        "last_index": 0,
-        "last_place_name": None,
-        "last_places_list": [],
-        "last_location_context": None,
-    }
-
-
-def load_conversation_state(state_key: str) -> dict:
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT state_json FROM conversation_state WHERE state_key = ?",
-            (state_key,),
-        ).fetchone()
-
-    state = _default_conversation_state()
-    if row is None:
-        return state
-
-    try:
-        stored = json.loads(row["state_json"])
-    except (TypeError, json.JSONDecodeError):
-        return state
-
-    if not isinstance(stored, dict):
-        return state
-
-    for key in state:
-        if key in stored:
-            state[key] = stored[key]
-
-    if not isinstance(state["last_results"], list):
-        state["last_results"] = []
-    if not isinstance(state["last_places_list"], list):
-        state["last_places_list"] = []
-
-    try:
-        state["last_index"] = max(0, int(state["last_index"]))
-    except (TypeError, ValueError):
-        state["last_index"] = 0
-
-    return state
-
-
-def save_conversation_state(state_key: str, state: dict) -> None:
-    safe_state = _default_conversation_state()
-
-    if isinstance(state, dict):
-        for key in safe_state:
-            if key in state:
-                safe_state[key] = state[key]
-
-    if not isinstance(safe_state["last_results"], list):
-        safe_state["last_results"] = []
-    if not isinstance(safe_state["last_places_list"], list):
-        safe_state["last_places_list"] = []
-
-    # Bound persisted state so a defective recommendation response cannot
-    # grow the SQLite row without limit.
-    safe_state["last_results"] = safe_state["last_results"][:100]
-    safe_state["last_places_list"] = safe_state["last_places_list"][:100]
-
-    try:
-        safe_state["last_index"] = max(0, int(safe_state["last_index"]))
-    except (TypeError, ValueError):
-        safe_state["last_index"] = 0
-
-    payload = json.dumps(safe_state, ensure_ascii=False, default=str)
-    if len(payload.encode("utf-8")) > 512_000:
-        safe_state["last_results"] = []
-        payload = json.dumps(safe_state, ensure_ascii=False, default=str)
-
-    with _db() as conn:
-        conn.execute(
-            """
-            INSERT INTO conversation_state (state_key, state_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(state_key) DO UPDATE SET
-                state_json = excluded.state_json,
-                updated_at = excluded.updated_at
-            """,
-            (
-                state_key,
-                payload,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        conn.commit()
 
 
 def _validate_username(username: str) -> str:
