@@ -1,7 +1,12 @@
 import re
 import csv
 import os
-import requests
+import asyncio
+import logging
+import time
+from urllib.parse import quote
+
+import httpx
 import pandas as pd
 
 from rapidfuzz import fuzz
@@ -19,6 +24,48 @@ from app.data_loader import (
     valleys,
     pubs,
     colleges
+)
+
+logger = logging.getLogger(__name__)
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3")
+OLLAMA_TRANSIENT_STATUSES = {429, 502, 503, 504}
+OLLAMA_MAX_ATTEMPTS = 3
+OLLAMA_SEMAPHORE = asyncio.Semaphore(2)
+_ollama_failures = 0
+_ollama_opened_at = None
+OLLAMA_FAILURE_THRESHOLD = 3
+OLLAMA_COOLDOWN_SECONDS = 30.0
+
+
+def _ollama_circuit_open() -> bool:
+    global _ollama_failures, _ollama_opened_at
+    if _ollama_opened_at is None:
+        return False
+    if time.monotonic() - _ollama_opened_at >= OLLAMA_COOLDOWN_SECONDS:
+        _ollama_failures = 0
+        _ollama_opened_at = None
+        return False
+    return True
+
+
+def _record_ollama_success() -> None:
+    global _ollama_failures, _ollama_opened_at
+    _ollama_failures = 0
+    _ollama_opened_at = None
+
+
+def _record_ollama_failure() -> None:
+    global _ollama_failures, _ollama_opened_at
+    _ollama_failures += 1
+    if _ollama_failures >= OLLAMA_FAILURE_THRESHOLD:
+        _ollama_opened_at = time.monotonic()
+
+
+OLLAMA_FALLBACK_MESSAGE = (
+    "I can help with Vizag places, routes, nearby searches and trip planning. "
+    "Ask me about beaches, hospitals, restaurants, routes, budget, or places to visit in Vizag."
 )
 
 DEFAULT_CONVERSATION_STATE = {
@@ -504,14 +551,13 @@ def fix_single_column_csv_df(df):
         return df
 
 
-def ask_ollama(query):
-    """Fallback AI answer when the dataset cannot answer directly."""
-    try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": "phi3",
-                "prompt": f"""
+async def ask_ollama(query):
+    """Return an Ollama fallback answer without blocking FastAPI's event loop."""
+    if _ollama_circuit_open():
+        logger.warning("Ollama circuit open; local fallback used")
+        return OLLAMA_FALLBACK_MESSAGE
+
+    prompt = f"""
 You are Vizag AI Travel Assistant, a friendly ChatGPT-like travel helper for Visakhapatnam.
 
 Rules:
@@ -523,20 +569,71 @@ Rules:
 
 User question:
 {query}
-""",
-                "stream": False
-            },
-            timeout=25
-        )
+"""
 
-        data = response.json()
-        answer = data.get("response", "AI not responding.")
-        return clean_display_text(answer).replace("<br>", "\n")
+    timeout = httpx.Timeout(connect=2.0, read=25.0, write=5.0, pool=3.0)
 
-    except Exception as e:
-        print("OLLAMA ERROR:", e)
-        return "I can help with Vizag places, routes, nearby searches and trip planning. Ask me about beaches, hospitals, restaurants, routes, budget, or places to visit in Vizag."
+    async with OLLAMA_SEMAPHORE:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(1, OLLAMA_MAX_ATTEMPTS + 1):
+                try:
+                    response = await client.post(
+                        OLLAMA_URL,
+                        json={
+                            "model": OLLAMA_MODEL,
+                            "prompt": prompt,
+                            "stream": False,
+                        },
+                    )
 
+                    if response.status_code in OLLAMA_TRANSIENT_STATUSES:
+                        if attempt < OLLAMA_MAX_ATTEMPTS:
+                            await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                            continue
+                        response.raise_for_status()
+
+                    response.raise_for_status()
+                    data = response.json()
+                    answer = str(data.get("response") or "").strip()
+                    if not answer:
+                        raise ValueError("Ollama response was empty")
+
+                    _record_ollama_success()
+                    return clean_display_text(answer).replace("<br>", "\n")
+
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt < OLLAMA_MAX_ATTEMPTS:
+                        await asyncio.sleep(0.5 * (2 ** (attempt - 1)))
+                        continue
+                    _record_ollama_failure()
+                    logger.warning(
+                        "Ollama network failure",
+                        extra={
+                            "attempt": attempt,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+
+                except httpx.HTTPStatusError as exc:
+                    _record_ollama_failure()
+                    logger.warning(
+                        "Ollama HTTP failure",
+                        extra={
+                            "attempt": attempt,
+                            "status_code": exc.response.status_code,
+                        },
+                    )
+                    break
+
+                except (ValueError, KeyError, TypeError) as exc:
+                    _record_ollama_failure()
+                    logger.warning(
+                        "Ollama response parsing failure",
+                        extra={"error_type": type(exc).__name__},
+                    )
+                    break
+
+    return OLLAMA_FALLBACK_MESSAGE
 
 def smart_local_answer(query):
     """Useful ChatGPT-like answers that do not depend on Ollama."""
@@ -1423,7 +1520,7 @@ def format_places(df, category, location=None, more=False, state=None):
         if not str(map_url).startswith(("http://", "https://")):
             map_url = (
                 "https://www.google.com/maps/search/?api=1&query="
-                + requests.utils.quote(place_name)
+                + quote(place_name)
             )
 
         image_url = safe_get(
@@ -1658,7 +1755,7 @@ def handle_conversation_followup(query, state):
     return None
 
 
-def get_recommendations(query, language="English", state=None):
+async def get_recommendations(query, language="English", state=None):
     """Return recommendations plus updated per-session state.
 
     Conversation state is supplied by the caller and must be persisted by the
@@ -1775,7 +1872,7 @@ def get_recommendations(query, language="English", state=None):
         return format_places(df, category, location, state=state), state
 
     # If user asks a normal ChatGPT-like question, use AI fallback.
-    ai_response = ask_ollama(original_query)
+    ai_response = await ask_ollama(original_query)
     return [{"message": ai_response}], state
 
 
@@ -1809,7 +1906,7 @@ def detect_ambiguous_place(query):
     return matched_categories
 
 
-def get_recommendations_with_ambiguity(query, language="English", state=None):
+async def get_recommendations_with_ambiguity(query, language="English", state=None):
     """Check ambiguous place names using the caller's per-session state."""
     state = ensure_conversation_state(state)
     ambiguous_categories = detect_ambiguous_place(query)
@@ -1836,10 +1933,10 @@ def get_recommendations_with_ambiguity(query, language="English", state=None):
                 state=state,
             ), state
 
-    return get_recommendations(query, language, state=state)
+    return await get_recommendations(query, language, state=state)
 
 
-def get_recommendations_with_session(query, language="English", state=None):
+async def get_recommendations_with_session(query, language="English", state=None):
     """Resolve ambiguous follow-ups without any module-level session state."""
     state = ensure_conversation_state(state)
     query_clean = str(query or "").strip()
@@ -1901,4 +1998,4 @@ def get_recommendations_with_session(query, language="English", state=None):
                 state=state,
             ), state
 
-    return get_recommendations(query_clean, language, state=state)
+    return await get_recommendations(query_clean, language, state=state)

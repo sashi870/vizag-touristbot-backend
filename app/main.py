@@ -11,13 +11,19 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 import csv
-import requests
 import re
 import json
 import inspect
 from datetime import datetime, timedelta, timezone
 
 from app.services.recommendation_service import get_recommendations
+from app.services.translation_service import (
+    localize_only_plain_messages,
+    localize_response,
+    normalize_language,
+    translate_text_backend,
+    translate_to_english_backend,
+)
 from app.auth import (
     create_access_token,
     get_current_username,
@@ -258,312 +264,6 @@ def build_walking_route_tip(place):
             "🚖 Cab – Comfortable for Families"
         ),
     }
-
-TRANSLATION_CACHE = {}
-
-LANGUAGE_TARGETS = {
-    "English": "en",
-    "Telugu": "te",
-    "Hindi": "hi",
-    "Tamil": "ta",
-    "Kannada": "kn",
-    "Odia": "or",
-}
-
-
-FORCED_TRANSLATIONS = {
-    "Telugu": {
-        "You": "మీరు",
-        "Current Location": "ప్రస్తుత స్థానం",
-        "Bus details": "బస్ వివరాలు",
-        "Walking details": "నడక వివరాలు",
-        "Bike Auto Cab details": "బైక్ ఆటో క్యాబ్ వివరాలు",
-        "APSRTC Bus Details": "APSRTC బస్సు వివరాలు",
-        "Walking Details": "నడక వివరాలు",
-        "Bike / Auto / Cab Details": "బైక్ / ఆటో / క్యాబ్ వివరాలు",
-        "Ramakrishna Beach": "రామకృష్ణ బీచ్",
-        "RK Beach": "ఆర్‌కే బీచ్",
-        "Rushikonda Beach": "రుషికొండ బీచ్",
-        "Yarada Beach": "యారాడ బీచ్",
-        "Bheemunipatnam Beach": "భీమునిపట్నం బీచ్",
-        "Lawson's Bay Beach": "లాసన్స్ బే బీచ్",
-        "Sagar Nagar Beach": "సాగర్ నగర్ బీచ్",
-        "Gangavaram Beach": "గంగవరం బీచ్",
-        "Appikonda Beach": "అప్పికొండ బీచ్",
-        "Mangamaripeta Beach": "మంగమారిపేట బీచ్",
-        "Jodugullapalem Beach": "జోడుగుళ్లపాలెం బీచ్",
-        "Mutyalammapalem Beach": "ముత్యాలమ్మపాలెం బీచ్",
-        "Pudimadaka Beach": "పుడిమడక బీచ్",
-        "Divis Beach": "దివిస్ బీచ్",
-        "Kapuluppada Beach": "కాపులుప్పాడ బీచ్",
-        "Visakhapatnam": "విశాఖపట్నం",
-        "Vizag": "వైజాగ్",
-        "Bheemunipatnam": "భీమునిపట్నం",
-        "Mutyalammapalem": "ముత్యాలమ్మపాలెం",
-        "Kapuluppada": "కాపులుప్పాడ",
-        "Kommadi": "కొమ్మడి",
-        "Gajuwaka": "గాజువాక",
-        "Jagadamba": "జగదాంబ",
-        "Railway Station": "రైల్వే స్టేషన్",
-        "Fishing Beach": "ఫిషింగ్ బీచ్",
-        "Coastal Village": "తీర గ్రామం",
-        "Historic Beach": "చారిత్రక బీచ్",
-        "Tourist Beach": "పర్యాటక బీచ్",
-        "Family Beach": "కుటుంబ బీచ్",
-        "Urban Beach": "నగర బీచ్",
-        "Scenic Beach": "సుందరమైన బీచ్",
-        "Local Beach": "స్థానిక బీచ్",
-        "Water Sports Beach": "వాటర్ స్పోర్ట్స్ బీచ్",
-        "Located at": "ఉన్న ప్రదేశం",
-        "is famous for": "కు ప్రసిద్ధి",
-
-        "Here are popular beaches in Vizag 😊": "వైజాగ్‌లోని ప్రసిద్ధ బీచ్‌లు ఇక్కడ ఉన్నాయి 😊",
-        "Here are popular beaches in Vizag": "వైజాగ్‌లోని ప్రసిద్ధ బీచ్‌లు ఇక్కడ ఉన్నాయి",
-        "Beach Road": "బీచ్ రోడ్",
-        "Rushikonda Road": "రుషికొండ రోడ్",
-        "Yarada Village": "యారాడ గ్రామం",
-        "Pedda Waltair": "పెద్ద వాల్టెయిర్",
-        "Sagar Nagar": "సాగర్ నగర్",
-        "Gangavaram": "గంగవరం",
-        "Appikonda": "అప్పికొండ",
-        "Mangamaripeta": "మంగమారిపేట",
-        "Jodugullapalem": "జోడుగుళ్లపాలెం",
-        "Pudimadaka": "పుడిమడక",
-        "Anakapalle": "అనకాపల్లి",
-        "Near Divis Laboratories": "దివిస్ ల్యాబొరేటరీస్ సమీపంలో",
-        "Calm Beach": "ప్రశాంతమైన బీచ్",
-        "Photography Spot": "ఫోటోగ్రఫీ ప్రదేశం",
-        "Photography Beach": "ఫోటోగ్రఫీ బీచ్",
-        "Village Beach": "గ్రామీణ బీచ్",
-        "Temple Beach": "దేవాలయ బీచ్",
-        "Coastal Area": "తీర ప్రాంతం",
-        "Industrial Coastal Beach": "పారిశ్రామిక తీర బీచ్",
-        "Hidden Beach": "దాగి ఉన్న బీచ్",
-        "Cloudy": "మేఘావృతం",
-        "Thunderstorm": "ఉరుములతో కూడిన వర్షం",
-        "Partly sunny": "పాక్షికంగా ఎండగా ఉంది",
-        "Restaurant": "రెస్టారెంట్",
-        "Restaurants": "రెస్టారెంట్లు",
-        "Family restaurant": "కుటుంబ రెస్టారెంట్",
-        "Biryani restaurant": "బిర్యానీ రెస్టారెంట్",
-        "Chinese restaurant": "చైనీస్ రెస్టారెంట్",
-        "Fast food restaurant": "ఫాస్ట్ ఫుడ్ రెస్టారెంట్",
-        "Indian restaurant": "ఇండియన్ రెస్టారెంట్",
-        "Lunch restaurant": "లంచ్ రెస్టారెంట్",
-        "Non vegetarian restaurant": "నాన్ వెజిటేరియన్ రెస్టారెంట్",
-        "South Indian restaurant": "సౌత్ ఇండియన్ రెస్టారెంట్",
-        "Vegetarian restaurant": "వెజిటేరియన్ రెస్టారెంట్",
-    }
-}
-
-
-def apply_forced_translations(text: str, language: str) -> str:
-    language = normalize_language(language)
-    value = "" if text is None else str(text)
-    if language == "English" or not value:
-        return value
-    replacements = FORCED_TRANSLATIONS.get(language, {})
-    # Replace longer keys first to avoid RK/Ramakrishna conflicts.
-    for src in sorted(replacements, key=len, reverse=True):
-        value = value.replace(src, replacements[src])
-    return value
-
-SKIP_TRANSLATE_KEYS = {
-    "map_url", "url", "URL", "image", "image_url", "googleMapsUrl", "google_maps_url",
-    "website", "rapido_app"
-}
-
-def normalize_language(language: str = "English") -> str:
-    language = str(language or "English").strip()
-    return language if language in LANGUAGE_TARGETS else "English"
-
-
-def is_plain_non_language_value(value: str) -> bool:
-    text = str(value or "").strip()
-    if not text:
-        return True
-
-    if text.startswith("http://") or text.startswith("https://"):
-        return True
-
-    # Keep only numbers, prices, timings and short route codes unchanged.
-    # IMPORTANT: Do NOT keep normal words like Gajuwaka/Jagadamba unchanged.
-    # That was the reason Telugu/Kannada output became mixed with English.
-    if re.fullmatch(r"[₹0-9.,:;\-–—/()\s]+", text):
-        return True
-
-    # Route numbers/codes like 28C, 900K, 5:00, 22:45 should stay as-is.
-    # But plain place words like Gajuwaka must be translated.
-    if re.fullmatch(r"(?=.*\d)[A-Za-z0-9]{1,10}", text):
-        return True
-
-    return False
-
-
-def translate_text_backend(text, language: str = "English", source: str = "auto") -> str:
-    language = normalize_language(language)
-    text = "" if text is None else str(text)
-
-    if language == "English" or not text.strip():
-        return text
-
-    # Keep only pure numbers, fares, times and route codes unchanged.
-    if is_plain_non_language_value(text):
-        return text
-
-    # Exact common phrase replacement first.
-    exact = FORCED_TRANSLATIONS.get(language, {}).get(text)
-    if exact:
-        return exact
-
-    target = LANGUAGE_TARGETS[language]
-    cache_key = (source, target, text)
-    if cache_key in TRANSLATION_CACHE:
-        return TRANSLATION_CACHE[cache_key]
-
-    # IMPORTANT:
-    # Do NOT pre-replace words inside a full English sentence before Google Translate.
-    # Example: "Here are popular beaches in Vizag" + pre-replace Vizag => mixed output.
-    # First translate the full sentence, then apply forced replacements for place names.
-    try:
-        parts = re.findall(r".{1,420}(?:\s|$)", text, flags=re.S) or [text]
-        translated_parts = []
-
-        for part in parts:
-            chunk = part.strip()
-            if not chunk:
-                continue
-
-            response = requests.get(
-                "https://translate.googleapis.com/translate_a/single",
-                params={
-                    "client": "gtx",
-                    "sl": source,
-                    "tl": target,
-                    "dt": "t",
-                    "q": chunk,
-                },
-                timeout=8,
-            )
-            data = response.json()
-            translated_parts.append("".join(item[0] for item in data[0] if item and item[0]))
-
-        translated = " ".join(translated_parts).strip() or text
-        translated = apply_forced_translations(translated, language)
-
-        # If Google still returned too much English, at least force important local words.
-        if language != "English" and re.search(r"[A-Za-z]{3,}", translated):
-            fallback = apply_forced_translations(text, language)
-            # Use fallback only when it reduces English words.
-            if len(re.findall(r"[A-Za-z]{3,}", fallback)) < len(re.findall(r"[A-Za-z]{3,}", translated)):
-                translated = fallback
-
-        TRANSLATION_CACHE[cache_key] = translated
-        return translated
-
-    except Exception as e:
-        print("TRANSLATION ERROR:", e)
-        return apply_forced_translations(text, language)
-
-
-
-def translate_to_english_backend(text: str) -> str:
-    """Translate any Indian-language/user query to English before dataset matching.
-    This makes Telugu/Hindi/Tamil/Kannada/Odia voice/text queries work with English CSVs.
-    """
-    raw = "" if text is None else str(text).strip()
-    if not raw:
-        return raw
-
-    # Already mostly English: keep it unchanged for speed and accuracy.
-    # Indian-language scripts do not match this ASCII check.
-    if re.search(r"[A-Za-z]", raw) and not re.search(r"[\u0C00-\u0C7F\u0900-\u097F\u0B80-\u0BFF\u0C80-\u0CFF\u0B00-\u0B7F]", raw):
-        return raw
-
-    cache_key = ("auto", "en", raw)
-    if cache_key in TRANSLATION_CACHE:
-        return TRANSLATION_CACHE[cache_key]
-
-    try:
-        response = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={
-                "client": "gtx",
-                "sl": "auto",
-                "tl": "en",
-                "dt": "t",
-                "q": raw,
-            },
-            timeout=8,
-        )
-        data = response.json()
-        translated = "".join(item[0] for item in data[0] if item and item[0]).strip() or raw
-        TRANSLATION_CACHE[cache_key] = translated
-        return translated
-    except Exception as e:
-        print("QUERY TRANSLATE TO ENGLISH ERROR:", e)
-        return raw
-
-
-def localize_only_plain_messages(result, language: str = "English"):
-    """Keep place-card data fast/untranslated on backend, but localize normal AI/chat messages.
-    Frontend handles card descriptions/buttons. This avoids backend timeout for many cards.
-    """
-    language = normalize_language(language)
-    if language == "English":
-        return result
-
-    if not isinstance(result, dict):
-        return result
-
-    recommendations = result.get("recommendations")
-    if not isinstance(recommendations, list):
-        return result
-
-    localized_recs = []
-    for item in recommendations:
-        if isinstance(item, dict) and set(item.keys()) == {"message"}:
-            localized_recs.append({"message": translate_text_backend(item.get("message", ""), language)})
-        else:
-            localized_recs.append(item)
-
-    result = dict(result)
-    result["recommendations"] = localized_recs
-    result["language"] = language
-    return result
-
-def translate_payload_backend(payload, language: str = "English", key_name: str = ""):
-    language = normalize_language(language)
-
-    if language == "English":
-        return payload
-
-    if isinstance(payload, list):
-        return [translate_payload_backend(item, language, key_name) for item in payload]
-
-    if isinstance(payload, dict):
-        new_payload = {}
-        for key, value in payload.items():
-            if key in SKIP_TRANSLATE_KEYS:
-                new_payload[key] = value
-            else:
-                new_payload[key] = translate_payload_backend(value, language, key)
-        return new_payload
-
-    if isinstance(payload, str):
-        return translate_text_backend(payload, language)
-
-    return payload
-
-
-def localize_response(payload, language: str = "English"):
-    language = normalize_language(language)
-    localized = translate_payload_backend(payload, language)
-    if isinstance(localized, dict):
-        localized["language"] = language
-    return localized
-
-
 
 beaches_df = load_csv("beaches.csv")
 beach_apsrtc_df = fix_single_column_csv_df(load_first_existing_csv(["beachesapsrtc.csv", "beachesapsrtc(2).csv"]))
@@ -1178,18 +878,18 @@ class TranslateTextRequest(BaseModel):
 
 
 @app.post("/translate_text")
-def translate_text_api(data: TranslateTextRequest):
+async def translate_text_api(data: TranslateTextRequest):
     language = normalize_language(getattr(data, "language", "English"))
     text = getattr(data, "text", "") or ""
     try:
-        return {"text": translate_text_backend(text, language), "language": language}
+        return {"text": await translate_text_backend(text, language), "language": language}
     except Exception:
         traceback.print_exc()
         return {"text": text, "language": language}
 
 
 @app.post("/chat")
-def chat(data: ChatRequest):
+async def chat(data: ChatRequest):
     original_query = (getattr(data, "original_query", "") or data.query or "").strip()
     query = (data.query or "").strip()
     language = normalize_language(getattr(data, "language", "English"))
@@ -1197,7 +897,7 @@ def chat(data: ChatRequest):
     state_key = f"session:{session_id}"
 
     if not query and not original_query:
-        return localize_response(
+        return await localize_response(
             {"recommendations": [{"message": "Please enter something 😊"}]},
             language,
         )
@@ -1205,7 +905,7 @@ def chat(data: ChatRequest):
     try:
         query_for_backend = query
         if language != "English":
-            query_for_backend = translate_to_english_backend(original_query or query)
+            query_for_backend = await translate_to_english_backend(original_query or query)
 
         if query and re.search(r"[A-Za-z]", query):
             query_for_backend = query
@@ -1218,13 +918,13 @@ def chat(data: ChatRequest):
         #   `(recommendations, updated_state)`.
         parameters = inspect.signature(get_recommendations).parameters
         if "state" in parameters:
-            service_result = get_recommendations(
+            service_result = await get_recommendations(
                 query_for_backend,
                 language=language,
                 state=conversation_state,
             )
         else:
-            service_result = get_recommendations(
+            service_result = await get_recommendations(
                 query_for_backend,
                 language=language,
             )
@@ -1248,13 +948,13 @@ def chat(data: ChatRequest):
             "session_id": session_id,
         }
 
-        return localize_only_plain_messages(result, language)
+        return await localize_only_plain_messages(result, language)
 
     except HTTPException:
         raise
     except Exception:
         traceback.print_exc()
-        return localize_response(
+        return await localize_response(
             {"recommendations": [{"message": "Server Error 😢"}]},
             language,
         )
@@ -1977,17 +1677,17 @@ def get_speciality_details(place):
 
 
 @app.get("/details")
-def details_endpoint(place: str, category: str = "", language: str = "English"):
+async def details_endpoint(place: str, category: str = "", language: str = "English"):
     """Details button API used by Flutter.
     Reads the speciality/budget CSVs from backend/app/datasets and returns clean details.
     The category parameter is accepted for Flutter compatibility.
     """
     try:
         speciality_result = get_speciality_details(place)
-        return localize_response(speciality_result, language)
+        return await localize_response(speciality_result, language)
     except Exception as e:
         traceback.print_exc()
-        return localize_response({
+        return await localize_response({
             "name": place,
             "rating": "N/A",
             "details": "Server error while loading details.",
@@ -1998,12 +1698,12 @@ def details_endpoint(place: str, category: str = "", language: str = "English"):
 
 
 @app.get("/help")
-def help_desk(place: str, language: str = "English"):
+async def help_desk(place: str, language: str = "English"):
     try:
         # Details button now uses uploaded speciality/budget CSV files first.
         # If a place is not found in those CSVs, return "No specialities found".
         speciality_result = get_speciality_details(place)
-        return localize_response(speciality_result, language)
+        return await localize_response(speciality_result, language)
 
         for _, row in beaches_df.iterrows():
             beach_name = get_beach_name(row)
@@ -2041,7 +1741,7 @@ def help_desk(place: str, language: str = "English"):
 📍 Nearest Landmark: {nearest_landmark}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": beach_name,
                 "rating": safe_get(row, ["rating", "Rating"], "4.5"),
                 "details": details,
@@ -2074,7 +1774,7 @@ def help_desk(place: str, language: str = "English"):
 💰 Expected Budget: {expected_budget}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": park_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2129,7 +1829,7 @@ def help_desk(place: str, language: str = "English"):
 📌 Nearby Attractions: {nearby}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": temple_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2165,7 +1865,7 @@ def help_desk(place: str, language: str = "English"):
 💰 Expected Budget: {expected_budget}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": museum_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2197,7 +1897,7 @@ def help_desk(place: str, language: str = "English"):
 🌐 Website: {website}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": hospital_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2238,7 +1938,7 @@ def help_desk(place: str, language: str = "English"):
 💰 Expected Budget: {expected_budget}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": theater_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2273,7 +1973,7 @@ def help_desk(place: str, language: str = "English"):
 💰 Expected Budget: {expected_budget}
 """
 
-            return localize_response({
+            return await localize_response({
                 "name": pub_name,
                 "rating": safe_get(row, ["rating", "Rating", "totalScore", "score"], "N/A"),
                 "details": details,
@@ -2281,7 +1981,7 @@ def help_desk(place: str, language: str = "English"):
                 "specialities": [category, speciality, location],
             }, language)
 
-        return localize_response({
+        return await localize_response({
             "name": place.title(),
             "rating": "N/A",
             "details": "Place not found.",
@@ -2291,7 +1991,7 @@ def help_desk(place: str, language: str = "English"):
 
     except Exception:
         traceback.print_exc()
-        return localize_response({
+        return await localize_response({
             "name": place.title(),
             "rating": "N/A",
             "details": "Server error.",
@@ -2300,7 +2000,7 @@ def help_desk(place: str, language: str = "English"):
         }, language)
 
 @app.get("/transport")
-def get_transport_data(place: str = "", language: str = "English"):
+async def get_transport_data(place: str = "", language: str = "English"):
     try:
         buses = []
 
@@ -2523,15 +2223,15 @@ def get_transport_data(place: str = "", language: str = "English"):
                 })
 
 
-        return localize_response({"buses": buses}, language)
+        return await localize_response({"buses": buses}, language)
 
     except Exception as e:
         traceback.print_exc()
-        return localize_response({"buses": [], "error": str(e)}, language)
+        return await localize_response({"buses": [], "error": str(e)}, language)
 
 
 @app.get("/walking")
-def get_walking_data(place: str = "", language: str = "English"):
+async def get_walking_data(place: str = "", language: str = "English"):
     try:
         walking_details = []
 
@@ -2769,15 +2469,15 @@ def get_walking_data(place: str = "", language: str = "English"):
         if not walking_details or not any(has_useful_walking_details(item) for item in walking_details):
             walking_details = [build_walking_route_tip(place)]
 
-        return localize_response({"walking": walking_details}, language)
+        return await localize_response({"walking": walking_details}, language)
 
     except Exception as e:
         traceback.print_exc()
-        return localize_response({"walking": [], "error": str(e)}, language)
+        return await localize_response({"walking": [], "error": str(e)}, language)
 
 
 @app.get("/rapido")
-def get_rapido_data(place: str = "", language: str = "English"):
+async def get_rapido_data(place: str = "", language: str = "English"):
     try:
         rapido_details = []
 
@@ -3082,11 +2782,11 @@ def get_rapido_data(place: str = "", language: str = "English"):
                 })
 
 
-        return localize_response({"rapido": rapido_details}, language)
+        return await localize_response({"rapido": rapido_details}, language)
 
     except Exception as e:
         traceback.print_exc()
-        return localize_response({"rapido": [], "error": str(e)}, language)
+        return await localize_response({"rapido": [], "error": str(e)}, language)
 
 
 if __name__ == "__main__":
