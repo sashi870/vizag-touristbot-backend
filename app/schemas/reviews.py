@@ -1,6 +1,3 @@
-from datetime import date
-from typing import Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -11,8 +8,7 @@ class ReviewRequest(BaseModel):
         max_length=200,
     )
     category: str = Field(
-        ...,
-        min_length=1,
+        default="",
         max_length=100,
     )
     rating: int = Field(
@@ -22,11 +18,22 @@ class ReviewRequest(BaseModel):
     )
     review: str = Field(
         ...,
-        min_length=1,
+        min_length=2,
         max_length=2000,
     )
-    visited_date: Optional[date] = None
+    visited_date: str = Field(
+        default="",
+        max_length=30,
+    )
 
 
 class ReviewHelpfulRequest(BaseModel):
-    review_id: int = Field(..., ge=1)
+    place_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+    )
+    created_at: str = Field(
+        default="",
+        max_length=50,
+    )
