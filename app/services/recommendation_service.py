@@ -278,7 +278,7 @@ def load_transport_csv_file(possible_filenames):
                     print("TRANSPORT CSV LOAD ERROR:", filename, e)
                     continue
 
-            df.columns = [str(c).strip().replace("\ufeff", "").replace("Ã¯Â»Â¿", "").strip().strip('"') for c in df.columns]
+            df.columns = [str(c).strip().replace("\ufeff", "").replace("ÃƒÂ¯Ã‚Â»Ã‚Â¿", "").strip().strip('"') for c in df.columns]
             return fix_single_column_csv_df(df)
 
     return pd.DataFrame()
@@ -286,7 +286,7 @@ def load_transport_csv_file(possible_filenames):
 
 def normalize_route_text(value):
     value = str(value or "").lower().strip()
-    value = value.replace("â€™", "'")
+    value = value.replace("Ã¢â‚¬â„¢", "'")
     value = value.replace("&", " and ")
     value = re.sub(r"[^a-z0-9]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
@@ -431,11 +431,11 @@ def format_apsrtc_bus_details(rows, source, destination):
 
     for i, (_, row) in enumerate(rows.iterrows(), start=1):
         route_no = safe_get(row, ["Bus Route No", "Route No", "route_no", "bus_no", "Bus No"], "N/A")
-        route_desc = safe_get(row, ["Route Description (From â†’ To)", "Route Description", "Route", "route", "route_description"], "")
+        route_desc = safe_get(row, ["Route Description (From Ã¢â€ â€™ To)", "Route Description", "Route", "route", "route_description"], "")
         starting = safe_get(row, ["Starting Point", "Start", "source", "Source", "From"], "")
         ending = safe_get(row, ["Ending Point", "End", "destination", "Destination", "To"], "")
         via = safe_get(row, ["Key Stops (Via)", "Via", "via", "Key Stops", "stops"], "")
-        fare = safe_get(row, ["Approx Fare (â‚¹)", "Fare", "fare", "Approx Fare", "ticket_price"], "")
+        fare = safe_get(row, ["Approx Fare (Ã¢â€šÂ¹)", "Fare", "fare", "Approx Fare", "ticket_price"], "")
         time = safe_get(row, ["Journey Time", "Time", "duration", "Duration"], "")
         frequency = safe_get(row, ["Frequency", "frequency"], "")
         first_bus = safe_get(row, ["First Bus", "first_bus"], "")
@@ -447,9 +447,9 @@ def format_apsrtc_bus_details(rows, source, destination):
         lines.append(f"Option {i}")
         if route_no: lines.append(f"Route No: {route_no}")
         if route_desc: lines.append(f"Route: {route_desc}")
-        elif starting or ending: lines.append(f"Route: {starting} â†’ {ending}")
+        elif starting or ending: lines.append(f"Route: {starting} Ã¢â€ â€™ {ending}")
         if via: lines.append(f"Via: {via}")
-        if fare: lines.append(f"Approx Fare: â‚¹{str(fare).replace('â‚¹', '').strip()}")
+        if fare: lines.append(f"Approx Fare: Ã¢â€šÂ¹{str(fare).replace('Ã¢â€šÂ¹', '').strip()}")
         if time: lines.append(f"Journey Time: {time}")
         if frequency: lines.append(f"Frequency: {frequency}")
         if first_bus or last_bus: lines.append(f"Timings: {first_bus} to {last_bus}".strip())
@@ -507,7 +507,7 @@ def fix_single_column_csv_df(df):
 
     df = df.copy()
     df.columns = [
-        str(c).strip().replace("\ufeff", "").replace("Ã¯Â»Â¿", "").strip().strip('"')
+        str(c).strip().replace("\ufeff", "").replace("ÃƒÂ¯Ã‚Â»Ã‚Â¿", "").strip().strip('"')
         for c in df.columns
     ]
 
@@ -541,7 +541,7 @@ def fix_single_column_csv_df(df):
 
         fixed_df = pd.DataFrame(fixed_rows, columns=headers)
         fixed_df.columns = [
-            str(c).strip().replace("\ufeff", "").replace("Ã¯Â»Â¿", "").strip().strip('"')
+            str(c).strip().replace("\ufeff", "").replace("ÃƒÂ¯Ã‚Â»Ã‚Â¿", "").strip().strip('"')
             for c in fixed_df.columns
         ]
         return fixed_df
@@ -676,7 +676,7 @@ def smart_local_answer(query):
     if any(phrase in q for phrase in ["budget", "cost for trip", "how much money", "trip cost"]):
         return [{
             "message": (
-                "For a simple Vizag day trip, keep around â‚¹500â€“â‚¹1500 per person depending on food and transport. "
+                "For a simple Vizag day trip, keep around Ã¢â€šÂ¹500Ã¢â‚¬â€œÃ¢â€šÂ¹1500 per person depending on food and transport. "
                 "Beach visits are mostly low-cost; museums, cabs, cafes and restaurants increase the budget."
             )
         }]
@@ -698,7 +698,7 @@ def extract_name(query, state):
         if match:
             state["user_name"] = match.group(1).strip().title()
             return [{
-                "message": f"Hey {state['user_name']} ðŸ˜Š Nice to meet you!"
+                "message": f"Hey {state['user_name']} Ã°Å¸ËœÅ  Nice to meet you!"
             }]
 
     return None
@@ -708,13 +708,13 @@ def handle_greetings(query, state):
     greetings = [
         "hi", "hii", "hiii", "hello", "helo", "hey", "heyy",
         "good morning", "good afternoon", "good evening", "good night",
-        "namaste", "namaskar", "vanakkam", "à°¨à°®à°¸à±à°¤à±‡", "à°¹à°¾à°¯à±", "à°¹à°²à±‹",
-        "à¤¨à¤®à¤¸à¥à¤¤à¥‡", "à¤¹à¤¾à¤¯", "à¤¹à¥‡à¤²à¥‹", "à®µà®£à®•à¯à®•à®®à¯", "à²¹à²¾à²¯à³", "à²¨à²®à²¸à³à²•à²¾à²°"
+        "namaste", "namaskar", "vanakkam", "Ã Â°Â¨Ã Â°Â®Ã Â°Â¸Ã Â±ÂÃ Â°Â¤Ã Â±â€¡", "Ã Â°Â¹Ã Â°Â¾Ã Â°Â¯Ã Â±Â", "Ã Â°Â¹Ã Â°Â²Ã Â±â€¹",
+        "Ã Â¤Â¨Ã Â¤Â®Ã Â¤Â¸Ã Â¥ÂÃ Â¤Â¤Ã Â¥â€¡", "Ã Â¤Â¹Ã Â¤Â¾Ã Â¤Â¯", "Ã Â¤Â¹Ã Â¥â€¡Ã Â¤Â²Ã Â¥â€¹", "Ã Â®ÂµÃ Â®Â£Ã Â®â€¢Ã Â¯ÂÃ Â®â€¢Ã Â®Â®Ã Â¯Â", "Ã Â²Â¹Ã Â²Â¾Ã Â²Â¯Ã Â³Â", "Ã Â²Â¨Ã Â²Â®Ã Â²Â¸Ã Â³ÂÃ Â²â€¢Ã Â²Â¾Ã Â²Â°"
     ]
 
     if q in greetings or re.fullmatch(r"(hi+|hello+|hey+)", q):
         return [{
-            "message": f"Hello {state['user_name']} ðŸ˜Š I can help like a normal assistant. Ask me about nearby hospitals, restaurants near an area, beaches between places, routes, budget, or anything about Vizag."
+            "message": f"Hello {state['user_name']} Ã°Å¸ËœÅ  I can help like a normal assistant. Ask me about nearby hospitals, restaurants near an area, beaches between places, routes, budget, or anything about Vizag."
         }]
 
     return None
@@ -723,14 +723,14 @@ def handle_greetings(query, state):
 def handle_small_talk(query, state):
     q = query.lower().strip()
 
-    if any(word in q for word in ["thanks", "thank you", "tq", "à°§à°¨à±à°¯à°µà°¾à°¦à°¾à°²à±", "à¤¶à¥à¤•à¥à¤°à¤¿à¤¯à¤¾"]):
-        return [{"message": f"You're welcome {state['user_name']} â¤ï¸"}]
+    if any(word in q for word in ["thanks", "thank you", "tq", "Ã Â°Â§Ã Â°Â¨Ã Â±ÂÃ Â°Â¯Ã Â°ÂµÃ Â°Â¾Ã Â°Â¦Ã Â°Â¾Ã Â°Â²Ã Â±Â", "Ã Â¤Â¶Ã Â¥ÂÃ Â¤â€¢Ã Â¥ÂÃ Â¤Â°Ã Â¤Â¿Ã Â¤Â¯Ã Â¤Â¾"]):
+        return [{"message": f"You're welcome {state['user_name']} Ã¢ÂÂ¤Ã¯Â¸Â"}]
 
-    if any(word in q for word in ["bye", "goodbye", "see you", "à°¬à±ˆ", "à¤…à¤²à¤µà¤¿à¤¦à¤¾"]):
-        return [{"message": f"Bye {state['user_name']} ðŸ‘‹ Have a safe Vizag trip!"}]
+    if any(word in q for word in ["bye", "goodbye", "see you", "Ã Â°Â¬Ã Â±Ë†", "Ã Â¤â€¦Ã Â¤Â²Ã Â¤ÂµÃ Â¤Â¿Ã Â¤Â¦Ã Â¤Â¾"]):
+        return [{"message": f"Bye {state['user_name']} Ã°Å¸â€˜â€¹ Have a safe Vizag trip!"}]
 
-    if "how are you" in q or "how r u" in q or "à°®à±€à°°à± à°Žà°²à°¾" in q:
-        return [{"message": f"I'm doing great {state['user_name']} ðŸ˜Š Tell me what you need in Vizag."}]
+    if "how are you" in q or "how r u" in q or "Ã Â°Â®Ã Â±â‚¬Ã Â°Â°Ã Â±Â Ã Â°Å½Ã Â°Â²Ã Â°Â¾" in q:
+        return [{"message": f"I'm doing great {state['user_name']} Ã°Å¸ËœÅ  Tell me what you need in Vizag."}]
 
     if any(phrase in q for phrase in ["what can you do", "help me", "how can you help", "features"]):
         return [{
@@ -1505,15 +1505,15 @@ def format_places(df, category, location=None, more=False, state=None):
 
     if places.empty:
         return [{
-            "message": f"Sorry {state['user_name']} ðŸ˜… No more results found."
+            "message": f"Sorry {state['user_name']} Ã°Å¸Ëœâ€¦ No more results found."
         }]
 
     state["last_index"] = end
 
     if location:
-        intro = f"Here are popular {category} near {location.title()} ðŸ˜Š"
+        intro = f"Here are popular {category} near {location.title()} \U0001F60A"
     else:
-        intro = f"Here are popular {category} in Vizag ðŸ˜Š"
+        intro = f"Here are popular {category} in Vizag \U0001F60A"
 
     results = [{
         "message": intro
@@ -1784,7 +1784,7 @@ def handle_conversation_followup(query, state):
     # User says only category after greeting
     if q in ["yes", "ok", "okay", "sure"]:
         if last_category:
-            return [{"message": f"Sure ðŸ˜Š Do you want top {last_category}, nearby {last_category}, or transport details for a place?"}]
+            return [{"message": f"Sure Ã°Å¸ËœÅ  Do you want top {last_category}, nearby {last_category}, or transport details for a place?"}]
 
     return None
 
@@ -1801,7 +1801,7 @@ async def get_recommendations(query, language="English", state=None):
     query = original_query.lower().strip()
 
     if not query:
-        return [{"message": "Please ask me anything about Vizag ðŸ˜Š"}], state
+        return [{"message": "Please ask me anything about Vizag Ã°Å¸ËœÅ "}], state
 
     response = extract_name(original_query, state)
     if response:
