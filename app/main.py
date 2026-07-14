@@ -661,13 +661,13 @@ class AuthRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
-class HistoryMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str = Field(min_length=1, max_length=5000)
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
 
 
 class HistoryRequest(BaseModel):
-    history: list[HistoryMessage] = Field(default_factory=list, max_length=200)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=100)
 
 
 def _init_database():
@@ -741,12 +741,28 @@ def _validate_password(password: str) -> None:
 @app.middleware("http")
 async def limit_request_size(request: Request, call_next):
     content_length = request.headers.get("content-length")
-    if content_length:
+
+    if content_length is not None:
         try:
-            if int(content_length) > 1_048_576:
-                return JSONResponse(status_code=413, content={"detail": "Request body exceeds the 1 MB limit."})
+            request_size = int(content_length)
         except ValueError:
-            pass
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Invalid Content-Length header."},
+            )
+
+        if request_size < 0:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Invalid Content-Length header."},
+            )
+
+        if request_size > 1_048_576:
+            return JSONResponse(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                content={"detail": "Request body exceeds the 1 MB limit."},
+            )
+
     return await call_next(request)
 
 
