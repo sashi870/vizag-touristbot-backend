@@ -14,7 +14,7 @@ import csv
 import requests
 import re
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.services.recommendation_service import get_recommendations
 from app.auth import (
@@ -47,7 +47,7 @@ def review_summary_for_place(place_name):
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT username, place_name, category, rating, review,
+            SELECT id, username, place_name, category, rating, review,
                    visited_date, helpful, created_at
             FROM reviews
             ORDER BY created_at DESC
@@ -709,6 +709,10 @@ def _init_database():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_place ON reviews(place_name)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reviews_user_created "
+            "ON reviews(username, created_at)"
+        )
         conn.commit()
 
 
@@ -898,41 +902,106 @@ async def serve_frontend():
     return {"message": "Vizag AI Travel Assistant backend is running", "docs": "/docs"}
 
 
-@app.post("/reviews")
+@app.post("/reviews", status_code=status.HTTP_201_CREATED)
 def add_place_review(
     data: ReviewRequest,
     current_username: str = Depends(get_current_username),
 ):
-    place_name = data.place_name.strip()
-    category = data.category.strip()
-    review_text = data.review.strip()
-    created_at = datetime.now(timezone.utc).isoformat()
+    # Normalize whitespace while preserving the user's plain-text review.
+    # React Text nodes and Flutter Text widgets must render this as text,
+    # never through raw HTML rendering.
+    place_name = re.sub(r"\s+", " ", data.place_name).strip()
+    category = re.sub(r"\s+", " ", data.category).strip()
+    review_text = re.sub(r"\s+", " ", data.review).strip()
+    visited_date = data.visited_date.strip()
+
+    now = datetime.now(timezone.utc)
+    created_at = now.isoformat()
+    rate_limit_start = (now - timedelta(minutes=10)).isoformat()
 
     with _db() as conn:
-        conn.execute(
+        # Database-backed rate limit: at most five reviews per user
+        # during any rolling ten-minute period.
+        recent_review_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM reviews
+            WHERE username = ?
+              AND created_at >= ?
+            """,
+            (current_username, rate_limit_start),
+        ).fetchone()[0]
+
+        if recent_review_count >= 5:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many reviews submitted. Please try again later.",
+            )
+
+        # Reject an identical review for the same place during the same
+        # ten-minute window to reduce accidental duplicates and simple spam.
+        duplicate = conn.execute(
+            """
+            SELECT id
+            FROM reviews
+            WHERE username = ?
+              AND LOWER(TRIM(place_name)) = LOWER(TRIM(?))
+              AND review = ?
+              AND created_at >= ?
+            LIMIT 1
+            """,
+            (
+                current_username,
+                place_name,
+                review_text,
+                rate_limit_start,
+            ),
+        ).fetchone()
+
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You recently submitted the same review.",
+            )
+
+        cursor = conn.execute(
             """
             INSERT INTO reviews (
-                username, place_name, category, rating, review,
-                visited_date, helpful, created_at
+                username,
+                place_name,
+                category,
+                rating,
+                review,
+                visited_date,
+                helpful,
+                created_at
             ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
-                current_username, place_name, category, data.rating,
-                review_text, data.visited_date.strip(), created_at,
+                current_username,
+                place_name,
+                category,
+                data.rating,
+                review_text,
+                visited_date,
+                created_at,
             ),
         )
+        review_id = cursor.lastrowid
         conn.commit()
 
     new_review = {
+        "id": review_id,
         "username": current_username,
         "place_name": place_name,
         "category": category,
         "rating": data.rating,
         "review": review_text,
-        "visited_date": data.visited_date.strip(),
+        "visited_date": visited_date,
         "helpful": 0,
         "created_at": created_at,
     }
+
     return {
         "success": True,
         "message": "Thank you! Your review has been submitted.",
