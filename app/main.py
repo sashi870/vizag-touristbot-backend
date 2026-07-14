@@ -7,7 +7,6 @@ import pandas as pd
 import traceback
 import os
 import sqlite3
-import csv
 import re
 import json
 import inspect
@@ -45,6 +44,13 @@ from app.core.database import (
     save_conversation_state,
 )
 
+from app.data.csv_loader import (
+    fix_single_column_csv_df,
+    load_csv,
+    load_first_existing_csv,
+    safe_get,
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -75,137 +81,12 @@ def review_summary_for_place(place_name):
         "reviews": reviews[:10],
     }
 
-def load_csv(filename):
-    path = os.path.join(BASE_DIR, "datasets", filename)
-
-    if not os.path.exists(path):
-        print("Missing:", filename)
-        return pd.DataFrame()
-
-    try:
-        df = pd.read_csv(
-            path,
-            encoding="utf-8-sig",
-            engine="python",
-            on_bad_lines="skip"
-        )
-    except Exception:
-        try:
-            df = pd.read_csv(
-                path,
-                encoding="latin1",
-                engine="python",
-                on_bad_lines="skip"
-            )
-        except Exception as e:
-            print(f"CSV Error in {filename}: {e}")
-            return pd.DataFrame()
-
-    df.columns = [str(c).strip().replace("\ufeff", "") for c in df.columns]
-    return df
 
 
-def load_first_existing_csv(filenames):
-    """Load the first CSV that exists from app/datasets.
-    This supports both the clean filenames and the uploaded filenames with (1).
-    """
-    for filename in filenames:
-        path = os.path.join(BASE_DIR, "datasets", filename)
-        if os.path.exists(path):
-            return load_csv(filename)
-    print("Missing speciality file. Tried:", ", ".join(filenames))
-    return pd.DataFrame()
 
 
-def fix_single_column_csv_df(df):
-    if df is None or df.empty:
-        return df
-
-    df = df.copy()
-    df.columns = [str(c).strip().replace("\ufeff", "").replace("ï»¿", "").strip().strip('"') for c in df.columns]
-
-    # Fix CSVs where the complete header/row is wrapped inside quotes
-    # Example: hospital_apsrtc_buses.csv may load first column as full row and remaining columns as NaN.
-    if len(df.columns) > 1:
-        try:
-            first_col = df.columns[0]
-            other_cols = df.columns[1:]
-
-            other_empty_ratio = df[other_cols].isna().mean().mean()
-            first_has_csv_rows = df[first_col].astype(str).str.contains(",", regex=False).mean()
-
-            if other_empty_ratio > 0.80 and first_has_csv_rows > 0.50:
-                headers = [str(c).strip().replace("\ufeff", "").replace("ï»¿", "").strip().strip('"') for c in df.columns]
-                fixed_rows = []
-
-                for value in df[first_col].dropna().astype(str).tolist():
-                    value = value.strip()
-
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-
-                    value = value.replace('""', '"')
-                    row = next(csv.reader([value]))
-
-                    if len(row) < len(headers):
-                        row = row + [""] * (len(headers) - len(row))
-                    elif len(row) > len(headers):
-                        row = row[:len(headers)]
-
-                    fixed_rows.append(row)
-
-                fixed_df = pd.DataFrame(fixed_rows, columns=headers)
-                fixed_df.columns = [str(c).strip().replace("\ufeff", "").replace("ï»¿", "").strip().strip('"') for c in fixed_df.columns]
-                return fixed_df
-
-        except Exception as e:
-            print("CSV MULTI-COLUMN FIX ERROR:", e)
-
-    if len(df.columns) != 1:
-        return df
-
-    first_col = df.columns[0]
-
-    if "," not in first_col:
-        return df
-
-    try:
-        header_text = str(first_col).strip().replace("\ufeff", "").replace("ï»¿", "").strip().strip('"')
-        headers = next(csv.reader([header_text]))
-        fixed_rows = []
-
-        for value in df[first_col].dropna().astype(str).tolist():
-            value = value.strip()
-
-            if value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-
-            value = value.replace('""', '"')
-            row = next(csv.reader([value]))
-
-            if len(row) < len(headers):
-                row = row + [""] * (len(headers) - len(row))
-            elif len(row) > len(headers):
-                row = row[:len(headers)]
-
-            fixed_rows.append(row)
-
-        fixed_df = pd.DataFrame(fixed_rows, columns=headers)
-        fixed_df.columns = [str(c).strip().replace("\ufeff", "").replace("ï»¿", "").strip().strip('"') for c in fixed_df.columns]
-        return fixed_df
-
-    except Exception as e:
-        print("CSV FIX ERROR:", e)
-        return df
 
 
-def safe_get(row, keys, default=""):
-    for key in keys:
-        if key in row and pd.notna(row[key]):
-            value = str(row[key]).strip()
-            if value and value.lower() != "nan":
-                return value
-    return default
 
 
 # ============================================================
