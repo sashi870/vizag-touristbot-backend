@@ -6,7 +6,6 @@ from fastapi.responses import FileResponse, JSONResponse
 import pandas as pd
 import traceback
 import os
-import sqlite3
 import re
 import json
 import inspect
@@ -20,15 +19,9 @@ from app.services.translation_service import (
     translate_text_backend,
     translate_to_english_backend,
 )
-from app.auth import (
-    create_access_token,
-    get_current_username,
-    hash_password,
-    verify_password,
-)
+from app.auth import get_current_username
 
 from app.schemas import (
-    AuthRequest,
     ChatMessage,
     ChatRequest,
     HistoryRequest,
@@ -49,6 +42,7 @@ from app.data.csv_loader import (
     safe_get,
 )
 
+from app.api.auth import router as auth_router
 from app.api.reviews import router as reviews_router
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -206,6 +200,7 @@ speciality_files = {
 
 
 app = FastAPI(title="Vizag AI Travel Assistant")
+app.include_router(auth_router)
 app.include_router(reviews_router)
 
 
@@ -227,27 +222,6 @@ def _validate_session_id(session_id: str) -> str:
     return session_id
 
 
-def _validate_username(username: str) -> str:
-    username = username.strip()
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,19}", username):
-        raise HTTPException(
-            status_code=400,
-            detail="Username must be 4 to 20 characters, start with a letter, and contain only letters, numbers, or underscore.",
-        )
-    return username
-
-
-def _validate_password(password: str) -> None:
-    if len(password) < 8 or len(password) > 128:
-        raise HTTPException(status_code=400, detail="Password must be 8 to 128 characters long.")
-    if not re.search(r"[A-Z]", password):
-        raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter.")
-    if not re.search(r"[a-z]", password):
-        raise HTTPException(status_code=400, detail="Password must contain at least one lowercase letter.")
-    if not re.search(r"[0-9]", password):
-        raise HTTPException(status_code=400, detail="Password must contain at least one number.")
-    if not re.search(r"[^A-Za-z0-9]", password):
-        raise HTTPException(status_code=400, detail="Password must contain at least one special character.")
 
 
 @app.middleware("http")
@@ -278,47 +252,6 @@ async def limit_request_size(request: Request, call_next):
     return await call_next(request)
 
 
-@app.post("/auth/register", status_code=status.HTTP_201_CREATED)
-def register_user(payload: AuthRequest):
-    username = _validate_username(payload.username)
-    _validate_password(payload.password)
-    try:
-        secure_hash = hash_password(payload.password)
-        with _db() as conn:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username, secure_hash, datetime.now(timezone.utc).isoformat()),
-            )
-            conn.commit()
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="This username is already registered. Please login.") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"success": True, "username": username, "message": "Registration successful. Please login."}
-
-
-@app.post("/auth/login")
-def login_user(payload: AuthRequest):
-    username = payload.username.strip()
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT username, password_hash FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
-    if row is None or not verify_password(payload.password, row["password_hash"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = create_access_token(row["username"])
-    return {
-        "success": True,
-        "access_token": token,
-        "token_type": "bearer",
-        "username": row["username"],
-        "message": "Login successful.",
-    }
 
 
 @app.get("/history")
